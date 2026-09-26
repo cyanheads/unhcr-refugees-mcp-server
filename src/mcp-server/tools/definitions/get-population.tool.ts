@@ -8,18 +8,21 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { POPULATION_FOOTNOTE_TYPES, type Provider } from '@/services/unhcr/codes.js';
-import { matchFootnotes } from '@/services/unhcr/footnote-match.js';
+import type { Provider } from '@/services/unhcr/codes.js';
+import { matchFootnotes, typesWithCounts } from '@/services/unhcr/footnote-match.js';
+import { pickIdentity } from '@/services/unhcr/normalize.js';
 import {
   type CompanionRow,
   type NowcastResult,
   type NowcastRow,
   POPULATION_FIELDS,
+  type PopulationField,
   type PopulationRow,
+  type RowIdentity,
 } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { blankAsUnset, resultInputs, scopeInputs } from '../shared/inputs.js';
-import { cell, count, table } from '../shared/markdown.js';
+import { cell, count, inline, table } from '../shared/markdown.js';
 import {
   countField,
   countryCell,
@@ -27,6 +30,7 @@ import {
   footnoteSchema,
   identityCells,
   identityFields,
+  normalizationNotes,
   renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
@@ -41,12 +45,44 @@ type JoinedRow = PopulationRow & {
   unrwa_refugees?: number | null;
 };
 
-const rowKey = (row: { asylum_iso3: string | null; origin_iso3: string | null; year: number }) =>
+const rowKey = (row: RowIdentity) =>
   `${row.year}|${row.origin_iso3 ?? ''}|${row.asylum_iso3 ?? ''}`;
 
-/** Join a companion series onto population rows by (year, origin, asylum); never summed in. */
-function companionIndex(rows: readonly CompanionRow[]): Map<string, number | null> {
-  return new Map(rows.map((row) => [rowKey(row), row.total]));
+const NO_POPULATION_COUNTS = Object.fromEntries(
+  POPULATION_FIELDS.map((field) => [field, null]),
+) as Record<PopulationField, null>;
+
+/**
+ * Join the companion series beside the population rows by (year, origin,
+ * asylum); never summed in. A key only a companion reports becomes its own row
+ * with every UNHCR count null, so no fetched companion figure is dropped.
+ * When a series repeats a key, its last row wins.
+ */
+function joinCompanions(
+  population: readonly PopulationRow[],
+  companions: readonly {
+    field: 'idmc_conflict_idps' | 'unrwa_refugees';
+    rows: readonly CompanionRow[];
+  }[],
+): { companionOnlyRows: number; rows: JoinedRow[] } {
+  const rows: JoinedRow[] = population.map((row) => ({ ...row }));
+  const byKey = Map.groupBy(rows, rowKey);
+  let companionOnlyRows = 0;
+  for (const { field, rows: series } of companions) {
+    for (const companion of series) {
+      const key = rowKey(companion);
+      let group = byKey.get(key);
+      if (!group) {
+        const row: JoinedRow = { ...pickIdentity(companion), ...NO_POPULATION_COUNTS };
+        group = [row];
+        byKey.set(key, group);
+        rows.push(row);
+        companionOnlyRows++;
+      }
+      for (const row of group) row[field] = companion.total;
+    }
+  }
+  return { companionOnlyRows, rows };
 }
 
 const STOCK_NOTES = [
@@ -57,16 +93,20 @@ const STOCK_NOTES = [
   'null means UNHCR marks the category not applicable or not collected (oip, for example, before the category existed); it is never zero.',
 ];
 
-/** When a nowcast row is dated: "August 2026", or the year alone when UNHCR sent no month. */
+/**
+ * When a nowcast row is dated: "August 2026", or the year alone when UNHCR sent
+ * no month. The month is upstream text inside server prose, so it is flattened.
+ */
 const snapshotLabel = (row: NowcastRow): string =>
-  row.month === null ? String(row.year) : `${row.month} ${row.year}`;
+  row.month === null ? String(row.year) : `${inline(row.month)} ${row.year}`;
 
 /**
  * The population result's data notes. `unexpectedValues` and `yearlessRows`
  * count the year-end and companion series; the nowcast's own counts are added
- * here.
+ * here. `companionOnlyRows` counts the rows only UNRWA or IDMC reports.
  */
 function dataNotes(options: {
+  companionOnlyRows: number;
   nowcast: NowcastResult | undefined;
   providers: readonly Provider[];
   unexpectedValues: number;
@@ -83,21 +123,23 @@ function dataNotes(options: {
       "idmc_conflict_idps is IDMC's estimate of people internally displaced by conflict and violence — the series UNHCR uses for its total-forcibly-displaced headline. It differs from idps and is never added into it.",
     );
   }
+  if (options.companionOnlyRows > 0) {
+    notes.push(
+      `${options.companionOnlyRows} row(s) carry only UNRWA or IDMC figures: UNHCR has no row for that year and scope, so every UNHCR column there is null.`,
+    );
+  }
   const period = options.nowcast?.rows[0];
   if (period) {
     notes.push(
       `Nowcast figures are estimates for ${snapshotLabel(period)}, sourced per country as the source field says.`,
     );
   }
-  const unexpectedValues = options.unexpectedValues + (options.nowcast?.unexpectedValues ?? 0);
-  if (unexpectedValues > 0) {
-    notes.push(
-      `${unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
-    );
-  }
-  if (options.yearlessRows > 0) {
-    notes.push(`${options.yearlessRows} upstream row(s) carried no usable year and were left out.`);
-  }
+  notes.push(
+    ...normalizationNotes({
+      unexpectedValues: options.unexpectedValues + (options.nowcast?.unexpectedValues ?? 0),
+      yearlessRows: options.yearlessRows,
+    }),
+  );
   if (options.nowcast?.skippedRows) {
     notes.push(
       `${options.nowcast.skippedRows} nowcast row(s) carried no usable year and were left out.`,
@@ -190,7 +232,9 @@ export const getPopulationTool = tool('unhcr_get_population', {
               "IDMC's estimate of people displaced by conflict and violence; a separate series from idps. Present only where IDMC has a row for this year and scope.",
             ).optional(),
           })
-          .describe('One year of stocks for one origin/asylum scope.'),
+          .describe(
+            'One year of stocks for one origin/asylum scope. A year and scope only UNRWA or IDMC reports carries every UNHCR count null.',
+          ),
       )
       .describe('Inline rows, sorted, up to limit.'),
     ...sharedResultFields,
@@ -281,7 +325,13 @@ export const getPopulationTool = tool('unhcr_get_population', {
             failure.window.year_to,
           ),
           latest_year: failure.coverage.latestYear,
-          data_notes: dataNotes({ nowcast, providers: [], unexpectedValues: 0, yearlessRows: 0 }),
+          data_notes: dataNotes({
+            companionOnlyRows: 0,
+            nowcast,
+            providers: [],
+            unexpectedValues: 0,
+            yearlessRows: 0,
+          }),
           attribution: buildAttribution([]),
           footnotes: [],
           footnotes_total: 0,
@@ -309,64 +359,52 @@ export const getPopulationTool = tool('unhcr_get_population', {
       input.include_nowcast && !originListed ? service.nowcast(scope.asylum, ctx) : undefined,
     ]);
 
-    const unrwaByKey = companionIndex(unrwa.rows);
-    const idmcByKey = companionIndex(idmc.rows);
-    const providers = new Set<Provider>();
-    const rows: JoinedRow[] = population.rows.map((row) => {
-      const key = rowKey(row);
-      const joined: JoinedRow = { ...row };
-      if (unrwaByKey.has(key)) {
-        joined.unrwa_refugees = unrwaByKey.get(key) ?? null;
-        providers.add('UNRWA');
-      }
-      if (idmcByKey.has(key)) {
-        joined.idmc_conflict_idps = idmcByKey.get(key) ?? null;
-        providers.add('IDMC');
-      }
-      return joined;
-    });
+    const { companionOnlyRows, rows } = joinCompanions(population.rows, [
+      { field: 'unrwa_refugees', rows: unrwa.rows },
+      { field: 'idmc_conflict_idps', rows: idmc.rows },
+    ]);
+    const providers: Provider[] = [
+      ...(unrwa.rows.length > 0 ? (['UNRWA'] as const) : []),
+      ...(idmc.rows.length > 0 ? (['IDMC'] as const) : []),
+    ];
+    const yearlessRows = population.skippedRows + unrwa.skippedRows + idmc.skippedRows;
 
-    const matched = matchFootnotes(footnotes, rows, POPULATION_FOOTNOTE_TYPES);
+    // UNHCR caveats describe UNHCR counts, so a companion-only row matches none.
+    const matched = matchFootnotes(footnotes, population.rows, typesWithCounts);
     const notices =
       input.include_nowcast && originListed
         ? [
             'include_nowcast was skipped: the nowcast has no origin dimension. Omit origin to get current-year estimates by asylum country.',
           ]
         : [];
-    const complete = population.complete && unrwa.complete && idmc.complete;
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_population',
       datasetLabel: 'population',
       queryParams: { ...input },
-      dimensions: scope,
-      window: { clamps: scope.clamps, yearFrom: scope.query.yearFrom, yearTo: scope.query.yearTo },
+      scope,
       rows,
-      fetchedRows: population.rows.length + population.skippedRows,
-      complete,
+      fetchedRows: population.rows.length + unrwa.rows.length + idmc.rows.length + yearlessRows,
+      complete: population.complete && unrwa.complete && idmc.complete,
       sortBy: input.sort_by,
       limit: input.limit,
       stage: input.stage,
       countFields: [...POPULATION_FIELDS, 'unrwa_refugees', 'idmc_conflict_idps'],
-      providers: [...providers],
+      providers,
       notices,
+      yearlessRows,
     });
 
     return {
-      rows: finished.rows,
-      total_rows: finished.total_rows,
-      complete,
+      ...finished,
       measure: 'stock' as const,
-      applied_scope: scope.applied,
-      latest_year: scope.coverage.latestYear,
-      ...(finished.dataset && { dataset: finished.dataset }),
       data_notes: dataNotes({
+        companionOnlyRows,
         nowcast,
-        providers: [...providers],
+        providers,
         unexpectedValues:
           population.unexpectedValues + unrwa.unexpectedValues + idmc.unexpectedValues,
-        yearlessRows: population.skippedRows + unrwa.skippedRows + idmc.skippedRows,
+        yearlessRows,
       }),
-      attribution: finished.attribution,
       footnotes: matched.footnotes,
       footnotes_total: matched.total,
       ...(nowcast && { nowcast: nowcast.rows }),

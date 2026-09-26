@@ -1,16 +1,22 @@
 /**
  * @fileoverview Markdown helpers for `format()`. Upstream text (country and
  * region names, footnotes, nowcast source labels) and echoed caller input are
- * data: inline slots flatten CR/LF to a space, table cells also escape `\` and
- * `|`, multi-line text is blockquoted, and caller-supplied blobs are fenced
- * with a fence longer than any backtick run inside them. `structuredContent`
- * keeps every value verbatim; only the markdown twin is shaped here.
+ * data: inline slots flatten every line break to a space, table cells also
+ * escape `\` and `|`, multi-line text is blockquoted, and caller-supplied blobs
+ * are fenced with a fence longer than any backtick run inside them. A line
+ * break is CR, LF, or CRLF, and also VT, FF, the FS/GS/RS separators, NEL,
+ * U+2028, and U+2029, which some renderers and line splitters treat as one.
+ * `structuredContent` keeps every value verbatim; only the markdown twin is
+ * shaped here.
  * @module mcp-server/tools/shared/markdown
  */
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: FS, GS, RS, and NEL are line separators this must match.
+const LINE_BREAK = /\r\n|[\n\v\f\r\u{1c}-\u{1e}\u{85}\u{2028}\u{2029}]/gu;
+
 /** Flatten line breaks to single spaces for an inline slot. */
 export function inline(text: string): string {
-  return text.replace(/\r\n|\r|\n/g, ' ');
+  return text.replace(LINE_BREAK, ' ');
 }
 
 /** Escape text for one markdown table cell. */
@@ -21,7 +27,7 @@ export function cell(text: string): string {
 /** Blockquote text line by line, so multi-line upstream text stays one block. */
 export function blockquote(text: string): string {
   return text
-    .split(/\r\n|\r|\n/)
+    .split(LINE_BREAK)
     .map((line) => (line.trim() === '' ? '>' : `> ${line}`))
     .join('\n');
 }

@@ -4,7 +4,8 @@
  * captures the options `src/index.ts` passes: the identity, the registered
  * tools (all six data and reference tools plus the dataframe tools), the
  * stateless session posture, the server instructions, and the setup and
- * teardown hooks that build and release the services. The entry point reads
+ * teardown hooks that build and release the services, with dataframe listing
+ * off for an unauthenticated HTTP deployment. The entry point reads
  * `.env` from the working directory, so every import runs from a temporary
  * directory the test controls.
  * @module tests/index.test
@@ -18,6 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { ATTRIBUTION_SOURCE, DATA_LICENSE, DATASETS, TERMS_URL } from '@/services/unhcr/codes.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { createTestCanvas, shutdownCanvas } from './helpers/services.js';
 
 const createApp = vi.hoisted(() => vi.fn());
 
@@ -142,15 +144,39 @@ describe('server instructions', () => {
 });
 
 describe('lifecycle hooks', () => {
+  type SetupCore = {
+    canvas?: unknown;
+    config: { mcpAuthMode: 'jwt' | 'none' | 'oauth'; mcpTransportType: 'http' | 'stdio' };
+  };
+  const setup = (core: SetupCore) => (options.setup as (core: SetupCore) => void)(core);
+
   it('builds the UNHCR service and the canvas bridge in setup, and releases the service in teardown', async () => {
-    const setup = options.setup as (core: { canvas?: unknown }) => void;
     const teardown = options.teardown as () => Promise<void> | void;
-    setup({ canvas: undefined });
+    setup({ canvas: undefined, config: { mcpTransportType: 'stdio', mcpAuthMode: 'none' } });
     expect(getUnhcrService()).toBeDefined();
     expect(getCanvasBridge()).toBeUndefined();
     await teardown();
     expect(() => getUnhcrService()).toThrow(/not initialized/);
   });
+
+  it.each([
+    ['http', 'none', false],
+    ['http', 'jwt', true],
+    ['http', 'oauth', true],
+    ['stdio', 'none', true],
+  ] as const)(
+    'turns dataframe listing off only for unauthenticated HTTP (%s, auth %s → listing %s)',
+    async (mcpTransportType, mcpAuthMode, listing) => {
+      const canvas = createTestCanvas();
+      try {
+        setup({ canvas, config: { mcpTransportType, mcpAuthMode } });
+        expect(getCanvasBridge()?.listingEnabled).toBe(listing);
+      } finally {
+        await (options.teardown as () => Promise<void> | void)();
+        await shutdownCanvas(canvas);
+      }
+    },
+  );
 });
 
 describe('.env in the working directory', () => {

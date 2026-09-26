@@ -79,16 +79,18 @@ const DATA_TOOLS = [
   },
 ];
 
+const yearless = (row: RawRow): RawRow => ({ ...row, year: 'unknown' });
+
 /**
- * Answer the tool's data request with its fixture row plus a year-less copy.
- * The fake's own year filter would drop the year-less row, so the page is
- * served directly; `maxPages` above 1 makes a row cap of one page stop there.
+ * Answer the tool's data request with these rows. The fake's own year filter
+ * would drop a year-less row, so the page is served directly; `maxPages`
+ * above 1 makes a row cap of one page stop there.
  */
-function serveWithYearlessCopy(endpoint: string, row: RawRow, maxPages = 1): void {
+function serve(endpoint: string, rows: RawRow[], maxPages = 1): void {
   fake.intercept({
     endpoint,
     matches: (params) => params.has('yearFrom'),
-    respond: () => Response.json(envelope([row, { ...row, year: 'unknown' }], { maxPages })),
+    respond: () => Response.json(envelope(rows, { maxPages })),
   });
 }
 
@@ -96,7 +98,7 @@ describe('an upstream row with no usable year', () => {
   it.each(DATA_TOOLS)(
     '$tool leaves it out and says so in its own note on both surfaces',
     async ({ endpoint, row, run }) => {
-      serveWithYearlessCopy(endpoint, row);
+      serve(endpoint, [row, yearless(row)]);
       const result = await run();
       const structured = structuredOf(result);
       expect(structured.rows).toEqual([expect.objectContaining({ year: 2024 })]);
@@ -116,7 +118,7 @@ describe('an upstream row with no usable year', () => {
     async ({ endpoint, row, run }) => {
       disposeUnhcrService();
       ({ fake } = initFakeUpstream({ config: { maxRows: 10_000 } }));
-      serveWithYearlessCopy(endpoint, row, 2);
+      serve(endpoint, [row, yearless(row)], 2);
       const result = await run();
       const structured = structuredOf(result);
       expect(structured).toMatchObject({ complete: false, total_rows: 1 });
@@ -125,6 +127,27 @@ describe('an upstream row with no usable year', () => {
         "The fetch stopped at the server's row cap after 2 upstream rows, so this result is partial.";
       expect(structured.notice).toContain(partial);
       expect(textOf(result.content)).toContain(partial);
+    },
+  );
+
+  it.each(DATA_TOOLS)(
+    '$tool says an empty result came from year-less rows, not an empty scope, on both surfaces',
+    async ({ endpoint, row, run }) => {
+      serve(endpoint, [yearless(row)]);
+      const result = await run();
+      const structured = structuredOf(result);
+      expect(structured).toMatchObject({ rows: [], total_rows: 0 });
+      expect(structured.data_notes).toContain(
+        '1 upstream row(s) carried no usable year and were left out.',
+      );
+
+      for (const surface of [structured.notice as string, textOf(result.content)]) {
+        expect(surface).toMatch(
+          /UNHCR returned 1 row\(s\) for this scope, all without a usable year, so none could be placed in \d{4}(–\d{4})?; they were left out rather than guessed\./,
+        );
+        expect(surface).not.toContain('Widen the year window');
+        expect(surface).not.toContain('No rows for');
+      }
     },
   );
 });

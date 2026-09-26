@@ -10,7 +10,13 @@
  */
 
 import { pickIdentity } from './normalize.js';
-import type { AsylumApplicationRow, AsylumDecisionRow, RowIdentity } from './types.js';
+import {
+  APPLICATION_FIELDS,
+  type AsylumApplicationRow,
+  type AsylumDecisionRow,
+  DECISION_FIELDS,
+  type RowIdentity,
+} from './types.js';
 
 /** A procedure dimension an asylum result can be split by. */
 export type AsylumDimension = 'authority' | 'decision_level' | 'stage';
@@ -18,7 +24,11 @@ export type AsylumDimension = 'authority' | 'decision_level' | 'stage';
 /** What a count counts. */
 export type AsylumUnit = 'cases' | 'persons';
 
-const UNIT_BY_CODE: Readonly<Record<string, AsylumUnit>> = { P: 'persons', C: 'cases' };
+/** A `Map`, so upstream unit text such as `constructor` never resolves through `Object.prototype`. */
+const UNIT_BY_CODE: ReadonlyMap<string, AsylumUnit> = new Map([
+  ['P', 'persons'],
+  ['C', 'cases'],
+]);
 
 /** Output key listing the codes summed into a row, per dimension. */
 const LIST_KEY = {
@@ -80,7 +90,7 @@ function aggregate<D extends AsylumDimension, C extends string>(
   let skippedRows = 0;
 
   for (const row of rows) {
-    const unit = row.unit === null ? undefined : UNIT_BY_CODE[row.unit];
+    const unit = row.unit === null ? undefined : UNIT_BY_CODE.get(row.unit);
     if (!unit) {
       skippedRows++;
       continue;
@@ -157,9 +167,12 @@ export function aggregateApplications(
   options: { splitBy: readonly AsylumDimension[]; stages: readonly string[] },
 ): Aggregation<ApplicationAggregate> {
   const filtered = filterByCode(rows, 'stage', options.stages);
-  const { groups, skippedRows } = aggregate(filtered, APPLICATION_DIMENSIONS, options.splitBy, [
-    'applied',
-  ]);
+  const { groups, skippedRows } = aggregate(
+    filtered,
+    APPLICATION_DIMENSIONS,
+    options.splitBy,
+    APPLICATION_FIELDS,
+  );
   return {
     skippedRows,
     rows: groups.map((group) => ({
@@ -213,13 +226,12 @@ export function aggregateDecisions(
   },
 ): Aggregation<DecisionAggregate> {
   const filtered = filterByCode(rows, 'decision_level', options.decisionLevels);
-  const { groups, skippedRows } = aggregate(filtered, DECISION_DIMENSIONS, options.splitBy, [
-    'dec_recognized',
-    'dec_other',
-    'dec_rejected',
-    'dec_closed',
-    'dec_total',
-  ]);
+  const { groups, skippedRows } = aggregate(
+    filtered,
+    DECISION_DIMENSIONS,
+    options.splitBy,
+    DECISION_FIELDS,
+  );
   return {
     skippedRows,
     rows: groups.map((group) => {

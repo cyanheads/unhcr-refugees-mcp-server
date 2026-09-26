@@ -705,19 +705,18 @@ export class UnhcrApiService {
 
   /**
    * One HTTP attempt: a per-attempt timeout (30 s, capped at the call's
-   * remaining budget) composed with the retry loop's signal, cleared once the
-   * body is read. Every non-2xx maps through `httpErrorFromResponse` without
-   * its body, since UNHCR's error bodies are HTML pages; a network failure is
+   * remaining budget) composed with the retry loop's signal, covering the body
+   * read too. Every non-2xx maps through `httpErrorFromResponse` without its
+   * body, since UNHCR's error bodies are HTML pages; a network failure is
    * `ServiceUnavailable`.
    */
   private async fetchBody(url: string, attemptSignal: AbortSignal, deadlineAt: number) {
     const timeoutMs = Math.min(ATTEMPT_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now()));
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
       const response = await this.fetchImpl(url, {
         headers: REQUEST_HEADERS,
-        signal: AbortSignal.any([attemptSignal, controller.signal]),
+        signal: AbortSignal.any([attemptSignal, timeoutSignal]),
       });
       if (!response.ok) {
         throw await httpErrorFromResponse(response, { service: 'UNHCR', captureBody: false });
@@ -725,7 +724,7 @@ export class UnhcrApiService {
       return await response.text();
     } catch (error) {
       if (error instanceof McpError || attemptSignal.aborted) throw error;
-      if (controller.signal.aborted) {
+      if (timeoutSignal.aborted) {
         throw timeout(`UNHCR did not respond within ${Math.round(timeoutMs / 1000)} s.`);
       }
       throw serviceUnavailable(
@@ -733,8 +732,6 @@ export class UnhcrApiService {
         undefined,
         { cause: error },
       );
-    } finally {
-      clearTimeout(timer);
     }
   }
 }

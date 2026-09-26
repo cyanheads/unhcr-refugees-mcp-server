@@ -103,6 +103,26 @@ describe('parseCodeList', () => {
     const repeated = Array.from({ length: MAX_COUNTRY_CODES + 10 }, () => 'SYR').join(',');
     expect(parseCodeList(repeated, 'origin')).toEqual(['SYR']);
   });
+
+  it('splits on brackets and quotes too, so a list encoded into a string yields its codes', () => {
+    expect(parseCodeList('["DEU","AUT"]', 'asylum')).toEqual(['DEU', 'AUT']);
+    expect(parseCodeList('[ "syr" ]', 'origin')).toEqual(['SYR']);
+    expect(parseCodeList("['syr', 'afg']", 'origin')).toEqual(['SYR', 'AFG']);
+    expect(parseCodeList('[SYR, AFG]', 'origin')).toEqual(['SYR', 'AFG']);
+    expect(parseCodeList('[]', 'origin')).toEqual([]);
+    expect(parseCodeList('["", " "]', 'origin')).toEqual([]);
+  });
+
+  it('applies the cap to a list encoded into a string', () => {
+    const codes = Array.from(
+      { length: MAX_COUNTRY_CODES + 1 },
+      (_, i) => `C${String(i).padStart(2, '0')}`,
+    );
+    expect(parseCodeList(JSON.stringify(codes.slice(1)), 'asylum')).toHaveLength(MAX_COUNTRY_CODES);
+    expect(() => parseCodeList(JSON.stringify(codes), 'asylum')).toThrow(
+      `asylum lists ${MAX_COUNTRY_CODES + 1} country codes; the limit is ${MAX_COUNTRY_CODES}.`,
+    );
+  });
 });
 
 describe('resolveCountryCodes', () => {

@@ -138,23 +138,26 @@ describe('success, both surfaces', () => {
       male_unknown_age: 0,
       sex_disaggregated_share: 0.9943,
     });
+    // The Germany refugees caveat counts the 2025 REF row, not the ASY row beside it;
+    // the Syria returns caveat stays off, since no row here is a returns type.
     expect(structured.footnotes).toEqual([
-      expect.objectContaining({ asylum_iso3: 'DEU', years: '2025', rows_matched: 2 }),
-      expect.objectContaining({ origin_iso3: 'SYR', population_types: ['RET', 'RDP'] }),
+      expect.objectContaining({ asylum_iso3: 'DEU', years: '2025', rows_matched: 1 }),
     ]);
-    expect(structured.footnotes_total).toBe(2);
+    expect(structured.footnotes_total).toBe(1);
 
     const text = textOf(result.content);
     for (const expected of [
       '**Scope:** origin listed SYR · asylum listed DEU · years 2001–2025',
       '**Measure:** stock · **Latest year:** 2025 · **Rows:** 4 shown of 4 total · **Complete:** yes',
       '| 2024 | Syrian Arab Rep. [SYR · UNHCR SYR] | Germany [DEU · UNHCR GFR] | REF Refugees | 725,102 | yes | 99.91% | 22,781 | 52,613 | 35,793 | 146,543 | 11,326 | 25 | 269,081 | 24,484 | 56,340 | 46,846 | 313,633 | 13,979 | 97 | 455,379 |',
-      '### Footnotes (2 of 2)',
+      '### Footnotes (1 of 1)',
       '> Since 2022, the total figure of refugees from Ukraine in Germany',
+      '- **2025** · any origin, asylum DEU · types REF · 1 rows matched',
       'Source: UNHCR Refugee Population Statistics Database (CC BY 4.0)',
     ]) {
       expect(text).toContain(expected);
     }
+    expect(text).not.toContain('Return figures for Syria');
     for (const note of structured.data_notes as string[]) expect(text).toContain(note);
   });
 
@@ -376,8 +379,9 @@ describe('population_types and footnotes', () => {
     const returnsCaveat = (result: Awaited<ReturnType<typeof call>>) =>
       result.footnotes.find((note) => note.population_types.join() === 'RET,RDP');
 
+    // Seven type rows, of which RET and RDP carry the caveat's types.
     const unfiltered = await call(syr2025);
-    expect(returnsCaveat(unfiltered)).toMatchObject({ origin_iso3: 'SYR', rows_matched: 7 });
+    expect(returnsCaveat(unfiltered)).toMatchObject({ origin_iso3: 'SYR', rows_matched: 2 });
 
     const refugees = await call({ ...syr2025, population_types: ['REF'] });
     expect(returnsCaveat(refugees)).toBeUndefined();
@@ -417,6 +421,48 @@ describe('population_types and footnotes', () => {
     expect(await texts(['REF'])).toEqual(['Refugee-like figures for Syrians are estimates.']);
     expect(await texts(['IDP'])).toEqual(['IDP-like figures for Syria are estimates.']);
     expect(await texts(['ASY'])).toEqual([]);
+  });
+
+  it('attaches a caveat only to rows of its own types, on both surfaces', async () => {
+    upstream({
+      footnotes: [
+        ...FOOTNOTE_ROWS,
+        // Illustrative: an asylum-named stateless caveat, where no STA row exists.
+        footnoteRow({
+          footnote: 'Many stateless persons have been naturalized since 2011.',
+          year: '2025',
+          coo: null,
+          coa: 'SYR',
+          population_type: 'STA',
+        }),
+      ],
+    });
+    // SYR→SYR 2025 has IDP, HST, RET, and RDP rows only.
+    const result = await runToolContract(getDemographicsTool, {
+      origin: 'SYR',
+      asylum: 'SYR',
+      year_from: 2025,
+    });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({
+      total_rows: 4,
+      footnotes: [
+        {
+          text: 'Return figures for Syria combine government and UNHCR operational estimates.',
+          origin_iso3: 'SYR',
+          population_types: ['RET', 'RDP'],
+          rows_matched: 2,
+        },
+      ],
+      footnotes_total: 1,
+    });
+
+    const text = textOf(result.content);
+    expect(text).toContain('### Footnotes (1 of 1)');
+    expect(text).toContain(
+      '- **2024 - 2025** · origin SYR, any asylum · types RET, RDP · 2 rows matched',
+    );
+    expect(text).not.toContain('stateless persons have been naturalized');
   });
 
   it('treats blank and empty filters as unset', async () => {

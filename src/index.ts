@@ -45,7 +45,11 @@ await createApp({
         cacheMaxBytes: config.cacheMaxMb * 1024 * 1024,
       },
     });
-    initCanvasBridge(core.canvas, { ttlMs: config.datasetTtlSeconds * 1000 });
+    initCanvasBridge(core.canvas, {
+      ttlMs: config.datasetTtlSeconds * 1000,
+      // Unauthenticated HTTP callers all share tenant `default`, so a listing would show each other's dataframes.
+      listing: !(core.config.mcpTransportType === 'http' && core.config.mcpAuthMode === 'none'),
+    });
   },
   teardown() {
     disposeUnhcrService();

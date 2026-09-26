@@ -489,6 +489,24 @@ describe('odd upstream values', () => {
     });
   });
 
+  it('leaves out a unit code that names an Object.prototype member, on both surfaces', async () => {
+    upstream([
+      ...ASYLUM_APPLICATION_ROWS,
+      // Illustrative: unit text a plain-object lookup would resolve through the prototype.
+      applicationRow(2025, 'TIB', null, ['G', 'N', 'FI', 'constructor', 15]),
+    ]);
+    const result = await runToolContract(getAsylumApplicationsTool, {
+      origin: 'TIB',
+      year_from: 2025,
+    });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({ rows: [], total_rows: 0, complete: true });
+    const note =
+      '1 upstream row(s) carried a unit code other than P (persons) or C (cases) and were left out.';
+    expect(structured.data_notes).toContain(note);
+    expect(textOf(result.content)).toContain(note);
+  });
+
   it('reports a non-numeric count as null, never zero, and counts it in data_notes', async () => {
     const baseline = await call(syrDeu2025);
     upstream([

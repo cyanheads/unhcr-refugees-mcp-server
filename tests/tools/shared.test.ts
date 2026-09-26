@@ -8,7 +8,12 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
-import { blankAsUnset, codeList, resultInputs } from '@/mcp-server/tools/shared/inputs.js';
+import {
+  blankAsUnset,
+  codeList,
+  resultInputs,
+  scopeInputs,
+} from '@/mcp-server/tools/shared/inputs.js';
 import {
   blockquote,
   cell,
@@ -45,6 +50,19 @@ describe('input helpers', () => {
     for (const bad of [['X'], ['N', 'RA'], [1], 'N']) {
       expect(stages.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
+  });
+
+  it('caps a code-list filter at one entry per code in its list', () => {
+    expect(stages.safeParse(['N', 'R', 'A']).success).toBe(true);
+    expect(stages.safeParse(['N', 'R', 'A', 'N']).success).toBe(false);
+  });
+
+  it('caps a country filter at 1,000 characters as a string and 100 per listed code', () => {
+    const scope = z.object(scopeInputs);
+    expect(scope.safeParse({ origin: 'A'.repeat(1_000) }).success).toBe(true);
+    expect(scope.safeParse({ origin: 'A'.repeat(1_001) }).success).toBe(false);
+    expect(scope.safeParse({ asylum: ['A'.repeat(100)] }).success).toBe(true);
+    expect(scope.safeParse({ asylum: ['A'.repeat(101)] }).success).toBe(false);
   });
 
   it('gives a blank limit or stage its default', () => {
@@ -111,6 +129,13 @@ describe('asylum code rendering', () => {
 describe('markdown helpers', () => {
   it('flattens every line-break form for inline slots', () => {
     expect(inline('a\r\nb\rc\nd')).toBe('a b c d');
+  });
+
+  it('treats Unicode and control line separators as line breaks in every helper', () => {
+    expect(inline('a\u{2028}b\u{2029}c\u{85}d')).toBe('a b c d');
+    expect(inline('a\u{b}b\u{c}c\u{1c}d\u{1d}e\u{1e}f')).toBe('a b c d e f');
+    expect(cell('a|b\u{2029}c')).toBe('a\\|b c');
+    expect(blockquote('x\u{2028}y')).toBe('> x\n> y');
   });
 
   it('escapes backslashes and pipes in table cells after flattening', () => {

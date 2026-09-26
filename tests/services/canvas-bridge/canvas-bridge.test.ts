@@ -7,15 +7,18 @@
  * @module tests/services/canvas-bridge/canvas-bridge.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { logger } from '@cyanheads/mcp-ts-core/utils';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import {
   CanvasBridge,
   DATAFRAME_NAME,
   type DataframeMeta,
+  DEFAULT_STAGED_ROW_BUDGET,
   dataframeGuidance,
   getCanvasBridge,
   initCanvasBridge,
@@ -55,6 +58,24 @@ const stagedRows = (): RegisterOptions => ({
   ],
 });
 
+/** `stagedRows()` with `count` rows. */
+const rowsOf = (count: number): RegisterOptions => ({
+  ...stagedRows(),
+  rows: Array.from({ length: count }, (_, i) => ({
+    year: 2000 + i,
+    origin_iso3: 'SYR',
+    refugees: i,
+    oip: null,
+  })),
+});
+
+/** Tables physically present on the tenant's shared canvas, sorted. */
+const canvasTables = async (ctx: Context): Promise<string[]> => {
+  const id = await ctx.state.get<string>('canvas-id');
+  const instance = await canvas.acquire(id ?? undefined, ctx);
+  return (await instance.describe()).map((table) => table.name).sort();
+};
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('pure helpers', () => {
@@ -81,6 +102,15 @@ describe('pure helpers', () => {
         "SELECT '--' AS dash, x FROM df_ABCDE_12345 -- df_QQQQQ_QQQQQ\n/* df_RRRRR_RRRRR\n */ JOIN df_ZZZZZ_00000 USING (year)",
       ),
     ).toEqual(['df_ABCDE_12345', 'df_ZZZZZ_00000']);
+  });
+
+  it('scans 20,000 characters of unbalanced or doubled quotes within 50 ms', () => {
+    for (const unit of ["'", "'a", "x''"]) {
+      const sql = unit.repeat(Math.ceil(20_000 / unit.length)).slice(0, 20_000);
+      const started = performance.now();
+      expect(referencedDataframes(sql)).toEqual([]);
+      expect(performance.now() - started, JSON.stringify(unit)).toBeLessThan(50);
+    }
   });
 
   it('matches only whole df_XXXXX_XXXXX names', () => {
@@ -226,7 +256,7 @@ describe('query', () => {
         reason: 'missing_table',
         tableName: 'df_NOPE0_NOPE0',
         recovery: {
-          hint: 'Use unhcr_dataframe_describe to list the staged dataframes, or re-run the unhcr_get_* call that produced it.',
+          hint: 'Check the name against the dataset.name or register_as that created it; if it expired or was evicted, re-run the unhcr_get_* call that produced it.',
         },
       },
     });
@@ -318,6 +348,122 @@ describe('query', () => {
   });
 });
 
+describe('listing', () => {
+  it('is on by default and off when the deployment turns it off', () => {
+    expect(new CanvasBridge(canvas, { ttlMs: 60_000 }).listingEnabled).toBe(true);
+    expect(new CanvasBridge(canvas, { ttlMs: 60_000, listing: false }).listingEnabled).toBe(false);
+  });
+});
+
+describe('staging budget', () => {
+  const budgetBridge = () => new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 5 });
+
+  it('defaults to 1,000,000 rows per tenant', () => {
+    expect(DEFAULT_STAGED_ROW_BUDGET).toBe(1_000_000);
+  });
+
+  it('evicts the oldest dataframes once a new one takes the tenant over budget, and names them', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const a = await bridge.register(ctx, rowsOf(3));
+    await sleep(5);
+    const b = await bridge.register(ctx, rowsOf(2));
+    await sleep(5);
+    expect(a).not.toHaveProperty('evicted');
+    expect(b).not.toHaveProperty('evicted');
+
+    const c = await bridge.register(ctx, rowsOf(3));
+    expect(c?.evicted).toEqual([a?.name]);
+    expect((await bridge.describe(ctx)).map((meta) => meta.tableName)).toEqual([c?.name, b?.name]);
+    expect(await canvasTables(ctx)).toEqual([b?.name, c?.name].sort());
+    await expect(
+      bridge.query(ctx, `SELECT * FROM ${a?.name}`, { rowLimit: 10 }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.stringContaining('evicted'),
+      data: { reason: 'missing_table' },
+    });
+  });
+
+  it('never evicts the dataframe just staged, even when it alone exceeds the budget', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const b = await bridge.register(ctx, rowsOf(2));
+    await sleep(5);
+    const c = await bridge.register(ctx, rowsOf(3));
+    await sleep(5);
+    const d = await bridge.register(ctx, rowsOf(7));
+    expect(d?.evicted).toEqual([b?.name, c?.name]);
+    expect((await bridge.describe(ctx)).map((meta) => meta.tableName)).toEqual([d?.name]);
+  });
+
+  it('evicts after a register_as result exists, so the tables its SQL reads stay readable', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const a = await bridge.register(ctx, rowsOf(2));
+    await sleep(5);
+    const b = await bridge.register(ctx, rowsOf(2));
+    await sleep(5);
+    const { result, meta, evicted } = await bridge.query(ctx, `SELECT * FROM ${a?.name}`, {
+      rowLimit: 10,
+      registerAs: 'df_BUDGT_00001',
+    });
+    expect(result.rowCount).toBe(2);
+    expect(meta?.tableName).toBe('df_BUDGT_00001');
+    expect(evicted).toEqual([a?.name]);
+    expect(await canvasTables(ctx)).toEqual([b?.name, 'df_BUDGT_00001'].sort());
+  });
+
+  it('reports no evicted key when a register_as stays within the budget', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const a = await bridge.register(ctx, rowsOf(2));
+    const queried = await bridge.query(ctx, `SELECT * FROM ${a?.name}`, {
+      rowLimit: 10,
+      registerAs: 'df_BUDGT_00002',
+    });
+    expect(queried).not.toHaveProperty('evicted');
+  });
+
+  it('drops a register_as result that alone exceeds the budget, failing register_as_too_large and evicting nothing', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const a = await bridge.register(ctx, rowsOf(2));
+    const error = await bridge
+      .query(ctx, 'SELECT unnest(generate_series(1, 6)) AS n', {
+        rowLimit: 10,
+        registerAs: 'df_BUDGT_00003',
+      })
+      .catch((e) => e);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'register_as_too_large',
+        rowCount: 6,
+        rowBudget: 5,
+        recovery: {
+          hint: dataframeQueryTool.errors?.find((e) => e.reason === 'register_as_too_large')
+            ?.recovery,
+        },
+      },
+    });
+    expect((await bridge.describe(ctx)).map((meta) => meta.tableName)).toEqual([a?.name]);
+    expect(await canvasTables(ctx)).toEqual([a?.name]);
+  });
+
+  it('names no dataframe in the eviction log line, since under a shared tenant they are other callers’ handles', async () => {
+    const bridge = budgetBridge();
+    const ctx = queryContext();
+    const a = await bridge.register(ctx, rowsOf(3));
+    await sleep(5);
+    await bridge.register(ctx, rowsOf(3));
+    const calls = (ctx.log as MockContextLogger).calls;
+    const eviction = calls.find((call) => call.msg.includes('evicted'));
+    expect(eviction).toMatchObject({ level: 'info', data: { evictedCount: 1 } });
+    expect(JSON.stringify(eviction)).not.toContain(String(a?.name));
+  });
+});
+
 describe('drop', () => {
   it('drops the table and its metadata, and reports false once nothing matches', async () => {
     const bridge = new CanvasBridge(canvas, { ttlMs: 60_000 });
@@ -331,6 +477,10 @@ describe('drop', () => {
 });
 
 describe('failure handling', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('latches a DuckDB load failure: staging returns nothing and no later call retries the load', async () => {
     const { canvas: failing, acquire } = createFailingCanvas();
     const bridge = new CanvasBridge(failing, { ttlMs: 60_000 });
@@ -356,6 +506,7 @@ describe('failure handling', () => {
   });
 
   it('keeps the bridge available after a staging failure that is not a load failure', async () => {
+    const serverLog = vi.spyOn(logger, 'warning').mockImplementation(() => {});
     const { canvas: failing, acquire } = createFailingCanvas(new Error('disk full'));
     const bridge = new CanvasBridge(failing, { ttlMs: 60_000 });
     const ctx = queryContext();
@@ -366,10 +517,51 @@ describe('failure handling', () => {
     const warnings = (ctx.log as MockContextLogger).calls.filter(
       (call) => call.level === 'warning',
     );
-    expect(warnings[0]).toMatchObject({
+    // The client-visible log gets a fixed line; the engine's text stays on the server.
+    expect(warnings[0]).toEqual({
+      level: 'warning',
       msg: 'Dataframe staging failed; the inline rows stand',
-      data: { error: 'disk full', sourceTool: 'unhcr_get_population' },
+      data: { sourceTool: 'unhcr_get_population' },
     });
+    expect(serverLog).toHaveBeenCalledWith(
+      'Dataframe staging failed; the inline rows stand',
+      expect.objectContaining({
+        extra: expect.objectContaining({ error: 'disk full', sourceTool: 'unhcr_get_population' }),
+      }),
+    );
+  });
+
+  it('keeps a failed drop’s engine text and the table name out of the client-visible log', async () => {
+    const serverLog = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+    const engineText = 'Catalog Error: Table with name df_OLD00_OLD00 is locked';
+    const drop = vi.fn(() => Promise.reject(new Error(engineText)));
+    const stub = {
+      acquire: vi.fn(() => Promise.resolve({ canvasId: 'STUBCANVAS', drop })),
+    } as unknown as DataCanvas;
+    const bridge = new CanvasBridge(stub, { ttlMs: 60_000 });
+    const ctx = queryContext();
+    await ctx.state.set('df-meta/df_OLD00_OLD00', {
+      tableName: 'df_OLD00_OLD00',
+      sourceTool: 'unhcr_get_population',
+      queryParams: {},
+      createdAt: '2020-01-01T00:00:00.000Z',
+      expiresAt: '2020-01-02T00:00:00.000Z',
+      rowCount: 1,
+      complete: true,
+      providers: [],
+      columnSchema: [],
+    } satisfies DataframeMeta);
+
+    await expect(bridge.describe(ctx)).resolves.toEqual([]);
+    expect(drop).toHaveBeenCalledWith('df_OLD00_OLD00');
+    const logged = JSON.stringify((ctx.log as MockContextLogger).calls);
+    expect(logged).toContain('Staged dataframe drop failed');
+    expect(logged).not.toContain('Catalog Error');
+    expect(logged).not.toContain('df_OLD00_OLD00');
+    expect(serverLog).toHaveBeenCalledWith(
+      'Staged dataframe drop failed',
+      expect.objectContaining({ extra: expect.objectContaining({ error: engineText }) }),
+    );
   });
 
   it('rethrows when the request was cancelled instead of swallowing the failure', async () => {

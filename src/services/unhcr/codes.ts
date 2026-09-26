@@ -326,23 +326,12 @@ export const DEMOGRAPHIC_TYPES = [
   'RDP',
 ] as const;
 
-/** Types counted inside another column, which footnotes can still name. */
-export const FOLDED_TYPES: Readonly<Record<string, string>> = { REF: 'ROC', IDP: 'IOC' };
-
-/** Population types whose footnotes attach to `unhcr_get_population` rows. */
-export const POPULATION_FOOTNOTE_TYPES = [
-  'REF',
-  'ROC',
-  'ASY',
-  'OIP',
-  'IDP',
-  'IOC',
-  'STA',
-  'OOC',
-  'HST',
-  'RET',
-  'RDP',
-] as const;
-
-/** Population types whose footnotes attach to `unhcr_get_solutions` rows. */
-export const SOLUTIONS_FOOTNOTE_TYPES = ['RET', 'RST', 'NAT', 'RDP'] as const;
+/**
+ * Types counted inside another column, which footnotes can still name. A
+ * `Map`, so an upstream type such as `constructor` never resolves through
+ * `Object.prototype`.
+ */
+export const FOLDED_TYPES: ReadonlyMap<string, string> = new Map([
+  ['REF', 'ROC'],
+  ['IDP', 'IOC'],
+]);

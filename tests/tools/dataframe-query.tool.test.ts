@@ -2,7 +2,8 @@
  * @fileoverview Tests for unhcr_dataframe_query over a real in-memory DuckDB
  * canvas: results on both surfaces, the enrichment contract on empty,
  * under-cap, capped, and previewed pages, attribution carried from the staged
- * dataframes, register_as, every declared error reason, and cell escaping.
+ * dataframes, register_as and the staging budget's evictions, every declared
+ * error reason, and cell escaping.
  * @module tests/tools/dataframe-query.tool.test
  */
 
@@ -135,6 +136,35 @@ describe('pages through the production enrichment parse', () => {
     });
     expect(textOf(result.content)).toContain('**3 rows**, showing 1');
   });
+
+  it.each([
+    ['row_limit', { row_limit: 2 }, [{ n: 1 }, { n: 2 }]],
+    ['preview', { preview: 0 }, []],
+  ] as const)(
+    'points at the saved table when register_as keeps what %s withholds, on both surfaces',
+    async (_lever, bound, rows) => {
+      const result = await runToolContract(dataframeQueryTool, {
+        sql: 'SELECT * FROM (VALUES (1), (2), (3)) t(n)',
+        register_as: 'df_SAVED_00003',
+        ...bound,
+      });
+      const notice = `Showing ${rows.length} of 3 rows; the full result is saved as df_SAVED_00003, so query it for the rest.`;
+      expect(structuredOf(result)).toMatchObject({
+        registered_as: 'df_SAVED_00003',
+        row_count: 3,
+        row_count_capped: false,
+        rows,
+        truncated: true,
+        shown: rows.length,
+        cap: rows.length,
+        notice,
+      });
+      const text = textOf(result.content);
+      expect(text).toContain('Registered as df_SAVED_00003');
+      expect(text).toContain(notice);
+      expect(text).not.toContain('Use register_as');
+    },
+  );
 });
 
 describe('staged dataframes', () => {
@@ -213,6 +243,32 @@ describe('staged dataframes', () => {
       row_count: 2,
       complete: true,
     });
+  });
+
+  it('names the dataframes a register_as evicted to stay within the budget, on both surfaces', async () => {
+    const flow = flowContext();
+    const name = await stagePopulation(flow, { origin: 'SYR', asylum: 'DEU' });
+    initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
+    const result = await runToolContract(querySeededFrom(flow), {
+      sql: `SELECT year, refugees FROM ${name}`,
+      register_as: 'df_EVICT_00001',
+    });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({ registered_as: 'df_EVICT_00001', evicted: [name] });
+    expect(textOf(result.content)).toContain(
+      `**Evicted to stay within the staging budget:** ${name}`,
+    );
+  });
+
+  it('reports no evicted key when nothing was evicted', async () => {
+    const flow = flowContext();
+    const name = await stagePopulation(flow, { origin: 'SYR' });
+    const result = await queryIn(flow, {
+      sql: `SELECT year FROM ${name}`,
+      register_as: 'df_EVICT_00002',
+    });
+    expect(result).not.toHaveProperty('evicted');
+    expect(textOf(dataframeQueryTool.format!(result))).not.toContain('Evicted');
   });
 
   it('treats a blank row_limit as its default of 1000', async () => {
@@ -307,6 +363,36 @@ describe('declared errors, by reason', () => {
     });
   });
 
+  it('fails register_as_too_large on both surfaces when the result alone exceeds the staging budget', async () => {
+    initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 5 });
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT unnest(generate_series(1, 6)) AS n',
+      register_as: 'df_LARGE_00001',
+    });
+    const error = errorOf(result);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'register_as_too_large',
+        recovery: { hint: recoveryFor('register_as_too_large') },
+      },
+    });
+    expect(recoveryFor('register_as_too_large')).toEqual(expect.any(String));
+    const text = textOf(result.content);
+    expect(text).toContain('reason register_as_too_large');
+    expect(text).toContain(String(recoveryFor('register_as_too_large')));
+  });
+
+  it('tells no caller to list dataframes, since listing can be off', () => {
+    for (const entry of [
+      ...(dataframeQueryTool.errors ?? []),
+      ...(dataframeDescribeTool.errors ?? []),
+    ]) {
+      expect(entry.recovery, entry.reason).not.toMatch(/\blist/i);
+    }
+    expect(recoveryFor('missing_table')).toMatch(/evicted/);
+  });
+
   it('fails canvas_unavailable, not retryable, when the deployment has no canvas', async () => {
     initCanvasBridge(undefined);
     const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1' });
@@ -361,6 +447,18 @@ describe('declared errors, by reason', () => {
     expect(errorOf(await runToolContract(dataframeQueryTool, input)).code).toBe(
       JsonRpcErrorCode.InvalidParams,
     );
+  });
+
+  it('accepts sql of exactly 20,000 characters and rejects 20,001, naming the cap on both surfaces', async () => {
+    const paddedTo = (length: number) => 'SELECT 1 AS n'.padEnd(length, ' ');
+    const atCap = await runToolContract(dataframeQueryTool, { sql: paddedTo(20_000) });
+    expect(structuredOf(atCap).rows).toEqual([{ n: 1 }]);
+
+    const over = await runToolContract(dataframeQueryTool, { sql: paddedTo(20_001) });
+    const error = errorOf(over);
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.message).toContain('20,000 characters');
+    expect(textOf(over.content)).toContain('20,000 characters');
   });
 });
 

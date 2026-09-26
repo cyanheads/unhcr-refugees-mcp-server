@@ -561,6 +561,41 @@ describe('staging', () => {
   });
 });
 
+describe('a country list encoded into a string', () => {
+  it.each([
+    [
+      'asylum',
+      { origin: 'SYR', asylum: '["DEU","AUT"]' },
+      { origin: 'SYR', asylum: ['DEU', 'AUT'] },
+      ['DEU', 'AUT'],
+    ],
+    ['origin', { origin: '["SYR"]' }, { origin: ['SYR'] }, ['SYR']],
+  ] as const)(
+    'reads a JSON-encoded %s list as its codes, matching the array form on both surfaces',
+    async (dimension, encoded, list, codes) => {
+      const window = { year_from: 2024, year_to: 2024 };
+      const fromString = await runToolContract(getAsylumDecisionsTool, { ...encoded, ...window });
+      const fromArray = await runToolContract(getAsylumDecisionsTool, { ...list, ...window });
+      const structured = structuredOf(fromString);
+      expect(structured.applied_scope).toMatchObject({
+        [dimension]: { mode: 'listed', codes },
+      });
+      expect(structured.total_rows).toBeGreaterThan(0);
+      expect(structured).toEqual(structuredOf(fromArray));
+      expect(textOf(fromString.content)).toBe(textOf(fromArray.content));
+    },
+  );
+
+  it('names only the rejected code when an encoded list holds one', async () => {
+    const error = errorOf(
+      await runToolContract(getAsylumDecisionsTool, { asylum: '["DEU","GFR"]' }),
+    );
+    expect(error.data).toMatchObject({ reason: 'unknown_country_code', codes: ['GFR'] });
+    expect(error.message).toBe("Not an ISO3 code in UNHCR's country list: asylum GFR.");
+    expect(error.data?.recovery?.hint).toContain('pass DEU');
+  });
+});
+
 describe('declared errors, by reason', () => {
   it('fails unknown_country_code with the exact ISO3 for a UNHCR code', async () => {
     const error = errorOf(await runToolContract(getAsylumDecisionsTool, { asylum: 'GFR' }));

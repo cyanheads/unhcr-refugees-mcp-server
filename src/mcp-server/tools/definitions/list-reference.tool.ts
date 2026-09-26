@@ -76,7 +76,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
         "countries: every queryable country with its codes, names, and regions. regions: UNHCR's regional bureaus. coverage: first and latest year of each dataset, plus the current nowcast month. population_types: what each population type counts and which output column carries it. asylum_codes: asylum authority, application stage, decision level, and unit codes.",
       ),
     name_contains: blankAsUnset(z.string().max(200).optional()).describe(
-      'For topic countries only: keep countries whose names contain every word given, ignoring case, accents, and punctuation, or whose ISO3, ISO2, or UNHCR code equals a word ("syria", "turkiye", "britain", "deu"). Words match every name variant UNHCR records, including short and formal names the output does not list. No fuzzy matching.',
+      'For topic countries only: keep countries whose names, in UNHCR’s English spelling, contain every word given, ignoring case, accents, and punctuation, or whose ISO3, ISO2, or UNHCR code equals a word ("syria", "turkiye", "britain", "deu"). Words match every name variant UNHCR records, including short and formal names the output does not list. No fuzzy matching.',
     ),
   }),
 
@@ -230,10 +230,12 @@ export const listReferenceTool = tool('unhcr_list_reference', {
           service.regions(ctx),
         ]);
         const tokens = normalizeText(query).split(/\s+/).filter(Boolean);
+        // A query with no Latin letter or digit leaves no token, and matches nothing rather than everything.
+        const matchable = query === '' || tokens.length > 0;
         const countries = list
           .filter(
             (country): country is Country & { iso3: string } =>
-              country.iso3 !== null && matchesQuery(country, tokens),
+              matchable && country.iso3 !== null && matchesQuery(country, tokens),
           )
           .sort((a, b) => a.name.localeCompare(b.name))
           .map((country) => ({
@@ -249,8 +251,11 @@ export const listReferenceTool = tool('unhcr_list_reference', {
           }));
         ctx.enrich.total(countries.length);
         if (countries.length === 0) {
+          const why = matchable
+            ? ''
+            : " Names match UNHCR's English spellings and codes match ISO3, ISO2, or UNHCR codes, so name_contains needs Latin letters or digits.";
           ctx.enrich.notice(
-            `No country name or code matched "${inline(query)}". Call unhcr_list_reference (topic countries) without name_contains to browse the full list.`,
+            `No country name or code matched "${inline(query)}".${why} Call unhcr_list_reference (topic countries) without name_contains to browse the full list.`,
           );
         }
         return { topic: input.topic, countries };

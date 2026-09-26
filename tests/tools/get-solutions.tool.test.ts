@@ -181,11 +181,37 @@ describe('success, both surfaces', () => {
   });
 
   it('does not attach population-only footnotes', async () => {
+    // SYR→DEU 2025 carries resettlement only: neither the Germany refugees caveat
+    // nor the Syria returns caveat applies.
     const result = await call({ origin: 'SYR', asylum: 'DEU', year_from: 2025 });
-    expect(result.footnotes).toEqual([
-      expect.objectContaining({ origin_iso3: 'SYR', population_types: ['RET', 'RDP'] }),
-    ]);
-    expect(result.footnotes.some((note) => note.asylum_iso3 === 'DEU')).toBe(false);
+    expect(result.footnotes).toEqual([]);
+    expect(result.footnotes_total).toBe(0);
+  });
+
+  it('attaches a footnote only to rows with a nonzero count in one of its types, on both surfaces', async () => {
+    // Origin SYR, every asylum country, 2024: JOR, LBN, and TUR report refugee
+    // returns, SYR→SYR IDP returns, and DEU resettlement only.
+    const result = await runToolContract(getSolutionsTool, {
+      origin: 'SYR',
+      expand: 'asylum',
+      year_from: 2024,
+      year_to: 2024,
+    });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({
+      total_rows: 5,
+      footnotes: [
+        {
+          text: 'Return figures for Syria combine government and UNHCR operational estimates.',
+          population_types: ['RET', 'RDP'],
+          rows_matched: 4,
+        },
+      ],
+      footnotes_total: 1,
+    });
+    expect(textOf(result.content)).toContain(
+      '- **2024 - 2025** · origin SYR, any asylum · types RET, RDP · 4 rows matched',
+    );
   });
 });
 

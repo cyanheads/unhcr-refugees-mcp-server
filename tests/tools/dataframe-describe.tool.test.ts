@@ -2,8 +2,9 @@
  * @fileoverview Tests for unhcr_dataframe_describe over a real in-memory DuckDB
  * canvas: staged provenance and column schema on both surfaces, name lookup
  * and misses, the lazy expiry sweep, the enrichment contract on an empty and a
- * populated listing, caller-chosen column names flattened in `content[]`, and
- * canvas_unavailable (canvas off and DuckDB latch).
+ * populated listing, caller-chosen column names flattened in `content[]`,
+ * canvas_unavailable (canvas off and DuckDB latch), and listing_unavailable
+ * when the deployment turns listing off while lookups by name keep working.
  * @module tests/tools/dataframe-describe.tool.test
  */
 
@@ -12,6 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
@@ -161,7 +163,7 @@ describe('unhcr_dataframe_describe', () => {
     const result = await describeIn(flow, { name: 'df_GONE0_GONE0' });
     expect(result.dataframes).toEqual([]);
     expect(getEnrichment(flow).notice).toBe(
-      'No dataframe named df_GONE0_GONE0; it may have expired. Call unhcr_dataframe_describe without name to list what is staged, or re-run the unhcr_get_* call that produced it.',
+      'No dataframe named df_GONE0_GONE0; it may have expired or been evicted to make room for newer dataframes. Call unhcr_dataframe_describe without name to list what is staged, or re-run the unhcr_get_* call that produced it.',
     );
   });
 
@@ -268,5 +270,55 @@ describe('unhcr_dataframe_describe', () => {
       '````json\n{\n  "sql": "SELECT \'```\' AS x FROM df_ZZZZZ_00000"\n}\n````',
     );
     expect(text).toContain('x VARCHAR NOT NULL');
+  });
+});
+
+describe('with listing off (HTTP without authentication, where every caller shares one tenant)', () => {
+  const LISTING_RECOVERY =
+    'Pass the exact dataframe name: the dataset.name a unhcr_get_* result returned, or your register_as name.';
+
+  beforeEach(() => {
+    initCanvasBridge(canvas, { ttlMs: 60_000, listing: false });
+  });
+
+  it('fails listing_unavailable with its recovery on both surfaces when name is omitted or blank', async () => {
+    const flow = flowContext();
+    await stagePopulation(flow, { origin: 'SYR', asylum: 'DEU' });
+    for (const input of [{}, { name: '' }]) {
+      const result = await runToolContract(describeSeededFrom(flow), input);
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'listing_unavailable', recovery: { hint: LISTING_RECOVERY } },
+      });
+      const text = textOf(result.content);
+      expect(text).toContain('reason listing_unavailable');
+      expect(text).toContain(LISTING_RECOVERY);
+      expect(text).not.toMatch(/df_[A-Z0-9]{5}_[A-Z0-9]{5}/);
+    }
+  });
+
+  it('still describes, queries, and drops a dataframe by its exact name', async () => {
+    const flow = flowContext();
+    const name = await stagePopulation(flow, { origin: 'SYR', asylum: 'DEU' });
+
+    const described = await runToolContract(describeSeededFrom(flow), { name });
+    expect(structuredOf(described).dataframes).toEqual([
+      expect.objectContaining({ name, row_count: 3 }),
+    ]);
+    const queried = await dataframeQueryTool.handler(
+      dataframeQueryTool.input.parse({ sql: `SELECT count(*) AS n FROM ${name}` }),
+      flow,
+    );
+    expect(queried.rows).toEqual([{ n: '3' }]);
+    const dropped = await dataframeDropTool.handler(dataframeDropTool.input.parse({ name }), flow);
+    expect(dropped.dropped).toBe(true);
+  });
+
+  it('does not suggest omitting name when a named dataframe is missing', async () => {
+    const flow = flowContext();
+    await describeIn(flow, { name: 'df_GONE0_GONE0' });
+    expect(getEnrichment(flow).notice).toBe(
+      'No dataframe named df_GONE0_GONE0; it may have expired or been evicted to make room for newer dataframes. Re-run the unhcr_get_* call that produced it.',
+    );
   });
 });

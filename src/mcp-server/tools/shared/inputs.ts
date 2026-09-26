@@ -28,7 +28,7 @@ export const codeList = <const T extends readonly [string, ...string[]]>(codes: 
         Array.isArray(value)
           ? value.map((code) => (typeof code === 'string' ? code.trim().toUpperCase() : code))
           : value,
-      z.array(z.enum(codes).describe(item)).optional(),
+      z.array(z.enum(codes).describe(item)).max(codes.length).optional(),
     ),
   );
 
@@ -38,11 +38,12 @@ const countryList = (dimension: string) =>
       .union([
         z
           .string()
+          .max(1_000)
           .describe(
             'One code, or several separated by commas or spaces, e.g. "SYR" or "SYR, AFG".',
           ),
         z
-          .array(z.string())
+          .array(z.string().max(100))
           .max(MAX_COUNTRY_CODES)
           .describe(`Codes as a list, e.g. ["SYR", "AFG"]; at most ${MAX_COUNTRY_CODES}.`),
       ])

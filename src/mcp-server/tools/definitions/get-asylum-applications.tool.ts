@@ -21,6 +21,7 @@ import {
   dataEnrichment,
   identityCells,
   identityFields,
+  normalizationNotes,
   renderAsylumLegend,
   renderNotesAndAttribution,
   renderResultHeader,
@@ -52,14 +53,7 @@ function dataNotes(options: {
       `${options.skippedRows} upstream row(s) carried a unit code other than P (persons) or C (cases) and were left out.`,
     );
   }
-  if (options.unexpectedValues > 0) {
-    notes.push(
-      `${options.unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
-    );
-  }
-  if (options.yearlessRows > 0) {
-    notes.push(`${options.yearlessRows} upstream row(s) carried no usable year and were left out.`);
-  }
+  notes.push(...normalizationNotes(options));
   return notes;
 }
 
@@ -192,8 +186,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
       sourceTool: 'unhcr_get_asylum_applications',
       datasetLabel: 'asylum-application',
       queryParams: { ...input },
-      dimensions: scope,
-      window: { clamps: scope.clamps, yearFrom: scope.query.yearFrom, yearTo: scope.query.yearTo },
+      scope,
       rows: aggregated.rows,
       fetchedRows: fetched.rows.length + fetched.skippedRows,
       complete: fetched.complete,
@@ -210,23 +203,18 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
       providers: [],
       notices: [],
       emptyNotice,
+      yearlessRows: fetched.skippedRows,
     });
 
     return {
-      rows: finished.rows,
-      total_rows: finished.total_rows,
-      complete: fetched.complete,
+      ...finished,
       measure: 'flow' as const,
-      applied_scope: scope.applied,
-      latest_year: scope.coverage.latestYear,
-      ...(finished.dataset && { dataset: finished.dataset }),
       data_notes: dataNotes({
         otherStages: aggregated.rows.some((row) => row.stages.some((code) => code !== 'N')),
         skippedRows: aggregated.skippedRows,
         unexpectedValues: fetched.unexpectedValues,
         yearlessRows: fetched.skippedRows,
       }),
-      attribution: finished.attribution,
     };
   },
 

@@ -21,6 +21,7 @@ import {
   dataEnrichment,
   identityCells,
   identityFields,
+  normalizationNotes,
   renderAsylumLegend,
   renderNotesAndAttribution,
   renderResultHeader,
@@ -59,14 +60,7 @@ function dataNotes(options: {
       `${options.skippedRows} upstream row(s) carried a unit code other than P (persons) or C (cases) and were left out.`,
     );
   }
-  if (options.unexpectedValues > 0) {
-    notes.push(
-      `${options.unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
-    );
-  }
-  if (options.yearlessRows > 0) {
-    notes.push(`${options.yearlessRows} upstream row(s) carried no usable year and were left out.`);
-  }
+  notes.push(...normalizationNotes(options));
   return notes;
 }
 
@@ -236,8 +230,7 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
       sourceTool: 'unhcr_get_asylum_decisions',
       datasetLabel: 'asylum-decision',
       queryParams: { ...input },
-      dimensions: scope,
-      window: { clamps: scope.clamps, yearFrom: scope.query.yearFrom, yearTo: scope.query.yearTo },
+      scope,
       rows: aggregated.rows,
       fetchedRows: fetched.rows.length + fetched.skippedRows,
       complete: fetched.complete,
@@ -267,16 +260,12 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
       providers: [],
       notices: [],
       emptyNotice,
+      yearlessRows: fetched.skippedRows,
     });
 
     return {
-      rows: finished.rows,
-      total_rows: finished.total_rows,
-      complete: fetched.complete,
+      ...finished,
       measure: 'flow' as const,
-      applied_scope: scope.applied,
-      latest_year: scope.coverage.latestYear,
-      ...(finished.dataset && { dataset: finished.dataset }),
       data_notes: dataNotes({
         multiLevel: aggregated.rows.some((row) => row.decision_levels.length > 1),
         skippedRows: aggregated.skippedRows,
@@ -284,7 +273,6 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
         unexpectedValues: fetched.unexpectedValues,
         yearlessRows: fetched.skippedRows,
       }),
-      attribution: finished.attribution,
     };
   },
 

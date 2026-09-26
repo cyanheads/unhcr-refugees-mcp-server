@@ -16,17 +16,28 @@ import {
   type MockContextLogger,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { logger } from '@cyanheads/mcp-ts-core/utils';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getPopulationTool } from '@/mcp-server/tools/definitions/get-population.tool.js';
-import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  DATAFRAME_NAME,
+  getCanvasBridge,
+  initCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { TERMS_URL } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import {
+  companionRow,
+  FOOTNOTE_ROWS,
+  footnoteRow,
+  IDMC_ROWS,
   MULTILINE_FOOTNOTE_TEXT,
   NOWCAST_ROWS,
   POPULATION_ROWS,
   populationRow,
+  UNRWA_ROWS,
 } from '../fixtures/unhcr.js';
+import { carryDataframeState } from '../helpers/dataframes.js';
 import { type FakeUnhcr, htmlNotFound } from '../helpers/fake-unhcr.js';
 import { errorOf, structuredOf, textOf } from '../helpers/results.js';
 import {
@@ -56,6 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   disposeUnhcrService();
+  vi.restoreAllMocks();
 });
 
 const context = () => createMockContext({ errors: getPopulationTool.errors });
@@ -96,7 +108,7 @@ describe('success, both surfaces', () => {
         terms_url: TERMS_URL,
         providers: [],
       },
-      footnotes_total: 2,
+      footnotes_total: 1,
     });
     const rows = structured.rows as Record<string, unknown>[];
     expect(rows[1]).toEqual({
@@ -117,13 +129,9 @@ describe('success, both surfaces', () => {
       returned_refugees: 0,
       returned_idps: 0,
     });
+    // The Syria returns caveat stays off: no SYR→DEU row has a returns count.
     expect(structured.footnotes).toEqual([
       expect.objectContaining({ asylum_iso3: 'DEU', years: '2025', rows_matched: 1 }),
-      expect.objectContaining({
-        origin_iso3: 'SYR',
-        population_types: ['RET', 'RDP'],
-        rows_matched: 2,
-      }),
     ]);
 
     const text = textOf(result.content);
@@ -131,7 +139,7 @@ describe('success, both surfaces', () => {
       '**Scope:** origin listed SYR · asylum listed DEU · years 1951–2025',
       '**Measure:** stock · **Latest year:** 2025 · **Rows:** 3 shown of 3 total · **Complete:** yes',
       '| 2024 | Syrian Arab Rep. [SYR · UNHCR SYR] | Germany [DEU · UNHCR GFR] | 725,102 | 62,959 | — | 0 | 0 | 0 | 0 | 0 | 0 |',
-      '### Footnotes (2 of 2)',
+      '### Footnotes (1 of 1)',
       '> Since 2022, the total figure of refugees from Ukraine in Germany',
       '- **2025** · any origin, asylum DEU · types REF · 1 rows matched',
       '### Data notes',
@@ -140,6 +148,73 @@ describe('success, both surfaces', () => {
     ]) {
       expect(text).toContain(expected);
     }
+    expect(text).not.toContain('Return figures for Syria');
+  });
+
+  it('attaches a footnote only to rows with a nonzero count in one of its types, on both surfaces', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        footnotes: [
+          ...FOOTNOTE_ROWS,
+          // Illustrative: origin-named caveats whose types only some SYR rows carry.
+          footnoteRow({
+            footnote: 'IDP figures for Syria are estimates.',
+            year: '2024',
+            coo: 'SYR',
+            coa: null,
+            population_type: 'IDP',
+          }),
+          footnoteRow({
+            footnote: 'Stateless figures for Syrians are partial.',
+            year: '2024',
+            coo: 'SYR',
+            coa: null,
+            population_type: 'STA',
+          }),
+          footnoteRow({
+            footnote: 'IDP-like figures for Syria are estimates.',
+            year: '2024',
+            coo: 'SYR',
+            coa: null,
+            population_type: 'IOC',
+          }),
+        ],
+      },
+    }));
+    // Origin SYR, every asylum country, 2024: DEU carries REF and ASY; JOR, LBN,
+    // and TUR carry REF and returns; SYR→SYR carries IDPs, IDP returns, and HST.
+    const result = await runToolContract(getPopulationTool, {
+      origin: 'SYR',
+      expand: 'asylum',
+      year_from: 2024,
+      year_to: 2024,
+    });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({ total_rows: 5, footnotes_total: 4 });
+    expect(
+      (structured.footnotes as { rows_matched: number; text: string }[]).map((note) => [
+        note.text,
+        note.rows_matched,
+      ]),
+    ).toEqual([
+      ['The Lebanese government estimates that 1.5 million Syrians are in Lebanon.', 1],
+      ['Return figures for Syria combine government and UNHCR operational estimates.', 4],
+      ['IDP figures for Syria are estimates.', 1],
+      ['IDP-like figures for Syria are estimates.', 1],
+    ]);
+
+    const text = textOf(result.content);
+    for (const expected of [
+      '### Footnotes (4 of 4)',
+      '- **2024 - 2025** · origin SYR, any asylum · types RET, RDP · 4 rows matched',
+      '- **2024** · origin SYR, any asylum · types IDP · 1 rows matched',
+      '- **2024** · origin SYR, any asylum · types IOC · 1 rows matched',
+      '> IDP figures for Syria are estimates.',
+    ]) {
+      expect(text).toContain(expected);
+    }
+    expect(text).not.toContain('Stateless figures for Syrians');
   });
 
   it('returns a zero-result page with the both-dimensions notice through the production enrichment parse', async () => {
@@ -246,7 +321,7 @@ describe('scope inputs', () => {
       normalized: [],
     });
     expect((structured.rows as { year: number }[]).map((row) => row.year)).toEqual([
-      1951, 2023, 2024, 2025,
+      1951, 1952, 1990, 2023, 2024, 2025,
     ]);
     expect(fake.urlsFor('countries')).toHaveLength(0);
   });
@@ -512,11 +587,92 @@ describe('companion series', () => {
     expect(first?.year).toBe(1951);
     expect(first).not.toHaveProperty('unrwa_refugees');
     expect(first).not.toHaveProperty('idmc_conflict_idps');
-    expect(result.rows[3]).toMatchObject({
+    expect(result.rows.at(-1)).toMatchObject({
       year: 2025,
       unrwa_refugees: 5964782,
       idmc_conflict_idps: 68653080,
     });
+  });
+
+  it('returns a key only a companion reports as its own row, every UNHCR count null, on both surfaces', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        unrwa: [
+          ...UNRWA_ROWS,
+          companionRow(2023, 'PSE', 'SYR', 575234),
+          companionRow(2024, 'PSE', 'SYR', 582745),
+        ],
+      },
+    }));
+    const result = await runToolContract(getPopulationTool, {
+      origin: 'PSE',
+      asylum: 'SYR',
+      year_from: 2020,
+    });
+    const structured = structuredOf(result);
+    expect(structured).not.toHaveProperty('notice');
+    expect(structured).toMatchObject({ total_rows: 2, attribution: { providers: ['UNRWA'] } });
+    const rows = structured.rows as Record<string, unknown>[];
+    expect(rows[1]).toEqual({
+      year: 2024,
+      origin_iso3: 'PSE',
+      origin_unhcr_code: 'GAZ',
+      origin_name: 'State of Palestine',
+      asylum_iso3: 'SYR',
+      asylum_unhcr_code: 'SYR',
+      asylum_name: 'Syrian Arab Rep.',
+      refugees: null,
+      asylum_seekers: null,
+      oip: null,
+      idps: null,
+      stateless: null,
+      ooc: null,
+      hst: null,
+      returned_refugees: null,
+      returned_idps: null,
+      unrwa_refugees: 582745,
+    });
+    const note =
+      '2 row(s) carry only UNRWA or IDMC figures: UNHCR has no row for that year and scope, so every UNHCR column there is null.';
+    expect(structured.data_notes).toContain(note);
+
+    const text = textOf(result.content);
+    expect(text).toContain(
+      '| 2024 | State of Palestine [PSE · UNHCR GAZ] | Syrian Arab Rep. [SYR · UNHCR SYR] | — | — | — | — | — | — | — | — | — | 582,745 |',
+    );
+    expect(text).toContain(`- ${note}`);
+    expect(text).not.toContain('_No year-end rows._');
+  });
+
+  it('merges a key both companions report, without a UNHCR row, into one row', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        unrwa: [...UNRWA_ROWS, companionRow(2024, 'PSE', 'PSE', 1_700_000)],
+        idmc: [
+          ...IDMC_ROWS,
+          companionRow(2024, 'PSE', 'PSE', 1_900_000),
+          companionRow(2025, 'PSE', 'PSE', 2_000_000),
+        ],
+      },
+    }));
+    const result = await call({ origin: 'PSE', asylum: 'PSE', year_from: 2020 });
+    expect(result.total_rows).toBe(2);
+    expect(
+      result.rows.map((row) => [
+        row.year,
+        row.refugees,
+        row.unrwa_refugees,
+        row.idmc_conflict_idps,
+      ]),
+    ).toEqual([
+      [2024, null, 1_700_000, 1_900_000],
+      [2025, null, undefined, 2_000_000],
+    ]);
+    expect(result.rows[1]).not.toHaveProperty('unrwa_refugees');
+    expect(result.attribution.providers).toEqual(['IDMC', 'UNRWA']);
+    expect(result.footnotes_total).toBe(0);
   });
 });
 
@@ -766,9 +922,33 @@ describe('staging', () => {
     const result = await call({ origin: 'SYR', asylum: 'DEU', stage: true }, ctx);
     expect(result.rows).toHaveLength(3);
     expect(result.dataset?.row_count).toBe(3);
+    expect(result.dataset).not.toHaveProperty('evicted');
     expect(getEnrichment(ctx)).toEqual({
       notice: `Full set staged as ${result.dataset?.name} (3 rows). Use unhcr_dataframe_describe to inspect its columns, then unhcr_dataframe_query to analyze it with SQL.`,
     });
+  });
+
+  it('names the dataframes its staging evicted to stay within the budget, on both surfaces', async () => {
+    const ctx = context();
+    const first = await call({ origin: 'SYR', asylum: 'DEU', stage: true }, ctx);
+    initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
+    const seeded: typeof getPopulationTool = {
+      ...getPopulationTool,
+      handler: async (input, next) => {
+        await carryDataframeState(ctx, next);
+        return getPopulationTool.handler(input, next);
+      },
+    };
+    const result = await runToolContract(seeded, { origin: 'SYR', asylum: 'DEU', stage: true });
+    expect(structuredOf(result).dataset).toEqual({
+      name: expect.stringMatching(DATAFRAME_NAME),
+      row_count: 3,
+      expires_at: expect.any(String),
+      evicted: [first.dataset?.name],
+    });
+    expect(textOf(result.content)).toContain(
+      `**Evicted to stay within the staging budget:** ${first.dataset?.name}`,
+    );
   });
 
   it('never stages an empty result, even on request', async () => {
@@ -813,7 +993,8 @@ describe('staging', () => {
     expect(structuredOf(second).notice).toContain('Dataframes are unavailable in this deployment');
   });
 
-  it('keeps the inline rows when the region map cannot load', async () => {
+  it('keeps the inline rows when the region map cannot load, with the cause in the server log only', async () => {
+    const serverLog = vi.spyOn(logger, 'warning').mockImplementation(() => {});
     fake.intercept({ endpoint: 'regions', respond: htmlNotFound });
     const ctx = context();
     const result = await call({ ...syrPairs2025, limit: 2 }, ctx);
@@ -821,8 +1002,16 @@ describe('staging', () => {
     expect(result).not.toHaveProperty('dataset');
     expect(getEnrichment(ctx).notice).toContain('could not be staged as a dataframe');
     const warnings = (ctx.log as MockContextLogger).calls.filter((c) => c.level === 'warning');
-    expect(warnings.map((c) => c.msg)).toContain(
+    expect(warnings).toContainEqual({
+      level: 'warning',
+      msg: 'Region data for staging could not load; the inline rows stand',
+      data: { sourceTool: 'unhcr_get_population' },
+    });
+    expect(serverLog).toHaveBeenCalledWith(
       'Region data for staging could not load; the inline rows stand',
+      expect.objectContaining({
+        extra: expect.objectContaining({ error: expect.any(String) }),
+      }),
     );
     expect(getCanvasBridge()?.available).toBe(true);
   });
@@ -837,6 +1026,21 @@ describe('row cap and odd values', () => {
     expect(structured).toMatchObject({ complete: false, total_rows: 2 });
     const notice =
       "The fetch stopped at the server's row cap after 2 upstream rows, so this result is partial. Narrow the year window, or list countries instead of expanding a dimension, to get a complete result.";
+    expect(structured.notice).toBe(notice);
+    const text = textOf(result.content);
+    expect(text).toContain('**Complete:** no — the row cap stopped the fetch');
+    expect(text).toContain(`> ${notice}`);
+  });
+
+  it('counts the companion series in the partial-result notice when one of them hits the cap', async () => {
+    disposeUnhcrService();
+    initFakeUpstream({ pageSize: { idmc: 2 }, config: { maxRows: 10_000 } });
+    // Three population rows, two of IDMC's three (capped), and no UNRWA rows for this scope.
+    const result = await runToolContract(getPopulationTool, { origin: 'SYR' });
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({ complete: false, total_rows: 3 });
+    const notice =
+      "The fetch stopped at the server's row cap after 5 upstream rows, so this result is partial. Narrow the year window, or list countries instead of expanding a dimension, to get a complete result.";
     expect(structured.notice).toBe(notice);
     const text = textOf(result.content);
     expect(text).toContain('**Complete:** no — the row cap stopped the fetch');
@@ -911,6 +1115,65 @@ describe('format', () => {
       '> The Albanian Government conducted the Population and Housing Census during the period of September–October 2023.\n>\n>\n>\n> The start-year figures',
     );
     expect(text).not.toContain('\r');
+  });
+
+  it('keeps a footnote split by a Unicode line separator inside its blockquote, verbatim in structuredContent', async () => {
+    const injected = 'Caveat for Germany.\u{2028}### Injected heading';
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        footnotes: [
+          footnoteRow({
+            footnote: injected,
+            year: '2025',
+            coo: null,
+            coa: 'DEU',
+            population_type: 'REF',
+          }),
+        ],
+      },
+    }));
+    const result = await runToolContract(getPopulationTool, {
+      origin: 'SYR',
+      asylum: 'DEU',
+      year_from: 2025,
+    });
+    expect(structuredOf(result).footnotes).toEqual([expect.objectContaining({ text: injected })]);
+    const text = textOf(result.content);
+    expect(text).toContain('> Caveat for Germany.\n> ### Injected heading');
+    expect(text).not.toContain('\u{2028}');
+  });
+
+  it('flattens a line break in the nowcast month where the data notes quote it', async () => {
+    const month = 'August\n### Injected';
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({ tables: { nowcasting: [{ ...NOWCAST_ROWS[1]!, month }] } }));
+    const result = await runToolContract(getPopulationTool, {
+      asylum: 'DEU',
+      include_nowcast: true,
+    });
+    const structured = structuredOf(result);
+    expect(structured.nowcast).toEqual([expect.objectContaining({ month })]);
+    const note =
+      'Nowcast figures are estimates for August ### Injected 2026, sourced per country as the source field says.';
+    expect(structured.data_notes).toContain(note);
+    expect(textOf(result.content)).toContain(`- ${note}`);
+  });
+
+  it('flattens a line break in the nowcast month where the after-coverage notice quotes it', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: { nowcasting: [{ ...NOWCAST_ROWS[2]!, month: 'August\u{2028}### Injected' }] },
+    }));
+    const result = await runToolContract(getPopulationTool, {
+      asylum: 'JOR',
+      year_from: 2026,
+      include_nowcast: true,
+    });
+    const notice =
+      "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August ### Injected 2026 estimate of refugees and asylum-seekers by asylum country.";
+    expect(structuredOf(result).notice).toBe(notice);
+    expect(textOf(result.content)).toContain(notice);
   });
 
   it('escapes pipes and flattens line breaks in upstream country names', async () => {

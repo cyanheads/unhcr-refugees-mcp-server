@@ -4,17 +4,32 @@
  * single SELECT with an allowlisted plan and no file-reading functions; this
  * tool also denies system catalogs, so a caller sees only the tables it holds
  * a handle to. Results carry the attribution UNHCR's terms require, crediting
- * the third-party series recorded for every dataframe the SQL references.
+ * the third-party series recorded for every dataframe the SQL references. A
+ * register_as result counts toward the tenant's staging budget and names any
+ * dataframes it evicted.
  * @module mcp-server/tools/definitions/dataframe-query
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { DATAFRAME_NAME, getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  DATAFRAME_NAME,
+  DATAFRAME_NAME_LENGTH,
+  getCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { blankAsUnset } from '../shared/inputs.js';
-import { cell, inline } from '../shared/markdown.js';
-import { attributionSchema, renderAttribution } from '../shared/outputs.js';
+import { cell, inline, table } from '../shared/markdown.js';
+import {
+  attributionSchema,
+  renderAttribution,
+  renderEvicted,
+  STAGING_BUDGET,
+} from '../shared/outputs.js';
 import { buildAttribution } from '../shared/results.js';
+
+/** Longest `sql` accepted: DuckDB's parse cost grows with statement length, and the cap bounds it. */
+const SQL_MAX_LENGTH = 20_000;
+const SQL_CAP = `${SQL_MAX_LENGTH.toLocaleString('en-US')} characters`;
 
 const renderValue = (value: unknown): string => {
   if (value === null || value === undefined) return '';
@@ -33,11 +48,17 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
     sql: z
       .string()
       .min(1)
+      .max(
+        SQL_MAX_LENGTH,
+        `limited to ${SQL_CAP}; split the analysis into smaller queries, chaining them with register_as.`,
+      )
       .describe(
-        'One DuckDB SELECT against df_XXXXX_XXXXX tables — joins, aggregates, window functions, and CTEs work. SUM and COUNT results come back as JSON strings (BIGINT); CAST(… AS DOUBLE) for inline arithmetic. Staged tables add origin/asylum UNHCR and UN region columns for regional GROUP BY.',
+        `One DuckDB SELECT against df_XXXXX_XXXXX tables, at most ${SQL_CAP} — joins, aggregates, window functions, and CTEs work. SUM and COUNT results come back as JSON strings (BIGINT); CAST(… AS DOUBLE) for inline arithmetic. Staged tables add origin/asylum UNHCR and UN region columns for regional GROUP BY.`,
       ),
-    register_as: blankAsUnset(z.string().regex(DATAFRAME_NAME).optional()).describe(
-      'Save the result as a new dataframe under this name (df_ plus two groups of 5 uppercase letters or digits, e.g. df_ABCDE_12345) with a fresh TTL, to chain analyses. The name must not already be staged.',
+    register_as: blankAsUnset(
+      z.string().max(DATAFRAME_NAME_LENGTH).regex(DATAFRAME_NAME).optional(),
+    ).describe(
+      `Save the result as a new dataframe under this name (df_ plus two groups of 5 uppercase letters or digits, e.g. df_ABCDE_12345) with a fresh TTL, to chain analyses. The name must not already be staged. The saved rows count toward the ${STAGING_BUDGET} staging budget: the oldest other dataframes are evicted to make room, and a result larger than the budget is not saved.`,
     ),
     preview: blankAsUnset(z.number().int().min(0).max(10_000).optional()).describe(
       'Rows to return inline when that should be fewer than the query materializes, e.g. a small sample while register_as keeps the whole result; a value above row_limit is treated as row_limit. Omit to return every row up to row_limit.',
@@ -68,6 +89,12 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       .string()
       .optional()
       .describe('ISO 8601 expiry of the new dataframe, when register_as was set.'),
+    evicted: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `Older dataframes dropped, oldest first, to keep the staged total within the ${STAGING_BUDGET} budget once register_as saved this result; they can no longer be queried. Present only when any were evicted.`,
+      ),
     attribution: attributionSchema,
   }),
 
@@ -99,16 +126,16 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       severity: 'notice',
       thrownBy: 'service',
-      when: 'A df_<id> the SQL names is not staged: it never existed or its TTL expired',
+      when: 'A df_<id> the SQL names is not staged: it never existed, its TTL expired, or it was evicted to make room for newer dataframes',
       recovery:
-        'Use unhcr_dataframe_describe to list the staged dataframes, or re-run the unhcr_get_* call that produced it.',
+        'Check the name against the dataset.name or register_as that created it; if it expired or was evicted, re-run the unhcr_get_* call that produced it.',
     },
     {
       reason: 'invalid_sql',
       code: JsonRpcErrorCode.ValidationError,
       severity: 'notice',
       thrownBy: 'service',
-      when: 'The SQL does not parse, or the SELECT fails to prepare: an unknown column, table, or function, or an invalid expression',
+      when: 'A statement starting with SELECT, WITH, or FROM does not parse, or the SELECT fails to prepare: an unknown column, table, or function, or an invalid expression',
       recovery: 'Check SQL syntax, column names, and table names against unhcr_dataframe_describe.',
     },
     {
@@ -129,13 +156,22 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       recovery: 'Choose a different df_XXXXX_XXXXX name for register_as, or omit register_as.',
     },
     {
+      reason: 'register_as_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      thrownBy: 'service',
+      when: `The register_as result alone holds more rows than the ${STAGING_BUDGET} staging budget, so it was not saved`,
+      recovery:
+        'Aggregate or filter so the result fits the staging budget, or omit register_as and read up to row_limit rows inline.',
+    },
+    {
       reason: 'non_select_statement',
       code: JsonRpcErrorCode.ValidationError,
       severity: 'notice',
       thrownBy: 'service',
-      when: 'The statement is not a read-only SELECT: an INSERT, UPDATE, DDL, PRAGMA, or other write the engine refuses',
+      when: 'The statement is not a read-only SELECT: an INSERT, UPDATE, DDL, PRAGMA, or other write the engine refuses, or SQL that fails to parse and does not start with SELECT, WITH, or FROM (such as a misspelled SELEC)',
       recovery:
-        'Send one read-only SELECT against df_<id> tables; list them with unhcr_dataframe_describe.',
+        'Send one read-only SELECT against the df_<id> tables your unhcr_get_* results or register_as calls created.',
     },
     {
       reason: 'multi_statement',
@@ -153,7 +189,7 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       thrownBy: 'service',
       when: 'The SQL calls a file-reading or external-data table function such as read_csv, read_parquet, or glob',
       recovery:
-        'Remove the file-reading function and query only the df_<id> tables unhcr_dataframe_describe lists.',
+        'Remove the file-reading function and query only the df_<id> tables your unhcr_get_* results or register_as calls created.',
     },
     {
       reason: 'plan_operator_not_allowed',
@@ -170,7 +206,8 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       severity: 'notice',
       thrownBy: 'service',
       when: 'The SQL references a system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*)',
-      recovery: 'Query only df_<id> tables; list them with unhcr_dataframe_describe.',
+      recovery:
+        'Query only the df_<id> tables your unhcr_get_* results or register_as calls created, by name.',
     },
   ],
 
@@ -187,7 +224,7 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
     // The canvas refuses a preview above rowLimit; past row_limit no more rows exist to show.
     const preview =
       input.preview === undefined ? undefined : Math.min(input.preview, input.row_limit);
-    const { result, meta, providers } = await bridge.query(ctx, input.sql, {
+    const { result, meta, providers, evicted } = await bridge.query(ctx, input.sql, {
       rowLimit: input.row_limit,
       ...(preview !== undefined && { preview }),
       ...(input.register_as !== undefined && { registerAs: input.register_as }),
@@ -208,10 +245,13 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
         guidance: `Showing ${result.rows.length} rows. More than row_limit (${input.row_limit}) matched, so row_count is the cap, not the full size. Use register_as to keep the whole result, or ${lever}.`,
       });
     } else if (result.rowCount > result.rows.length) {
+      // Re-running under the same register_as name would clash, so name the saved table instead.
       ctx.enrich.truncated({
         shown: result.rows.length,
         cap,
-        guidance: `Showing ${result.rows.length} of ${result.rowCount} rows. Use register_as to keep the whole result, or ${lever}.`,
+        guidance: meta
+          ? `Showing ${result.rows.length} of ${result.rowCount} rows; the full result is saved as ${meta.tableName}, so query it for the rest.`
+          : `Showing ${result.rows.length} of ${result.rowCount} rows. Use register_as to keep the whole result, or ${lever}.`,
       });
     }
 
@@ -221,6 +261,7 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       row_count_capped: capped,
       rows: result.rows,
       ...(meta && { registered_as: meta.tableName, expires_at: meta.expiresAt }),
+      ...(evicted && { evicted }),
       attribution: buildAttribution(providers),
     };
   },
@@ -232,6 +273,7 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
         `Registered as ${result.registered_as} (expires ${result.expires_at ?? 'with its TTL'}).`,
       );
     }
+    if (result.evicted) lines.push(renderEvicted(result.evicted));
     const shown = result.rows.length < result.row_count ? `, showing ${result.rows.length}` : '';
     lines.push(
       `**${result.row_count} rows**${result.row_count_capped ? ` — capped at row_limit${shown}; more rows matched` : shown}`,
@@ -243,10 +285,9 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
         lines.push(`Columns: ${result.columns.map(inline).join(', ')}`);
     } else {
       lines.push(
-        `| ${result.columns.map(cell).join(' | ')} |`,
-        `| ${result.columns.map(() => '---').join(' | ')} |`,
-        ...result.rows.map(
-          (row) => `| ${result.columns.map((column) => renderValue(row[column])).join(' | ')} |`,
+        table(
+          result.columns.map(cell),
+          result.rows.map((row) => result.columns.map((column) => renderValue(row[column]))),
         ),
       );
     }

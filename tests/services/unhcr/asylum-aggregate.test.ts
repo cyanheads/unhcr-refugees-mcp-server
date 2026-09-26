@@ -234,6 +234,24 @@ describe('aggregateApplications', () => {
     ]);
   });
 
+  it('skips a unit code that names an Object.prototype member, never reading it as a unit', () => {
+    const { rows, skippedRows } = aggregateApplications(
+      [
+        ...US_APPLICATIONS.slice(0, 2),
+        // Illustrative: unit text that a plain-object lookup would resolve through the prototype.
+        app(2015, null, 'USA', ['G', 'N', 'EO', 'constructor', 700]),
+        app(2015, null, 'USA', ['G', 'N', 'EO', '__proto__', 800]),
+        app(2015, null, 'USA', ['G', 'N', 'EO', 'toString', 900]),
+      ],
+      { splitBy: [], stages: [] },
+    );
+    expect(skippedRows).toBe(3);
+    expect(rows.map((row) => [row.unit, row.applied])).toEqual([
+      ['persons', 45394],
+      ['cases', 90582],
+    ]);
+  });
+
   it('keeps a sum null only while every value in it is null', () => {
     const { rows } = aggregateApplications(
       [

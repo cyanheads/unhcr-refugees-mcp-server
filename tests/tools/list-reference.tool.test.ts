@@ -144,6 +144,27 @@ describe('topic countries', () => {
     expect(isoOf(await run({ topic: 'countries', name_contains: 'Syira' }))).toEqual([]);
   });
 
+  it.each(['Россия', '日本', 'سوريا', 'Ελλάδα', '!!!'])(
+    'matches nothing for %j, which holds no Latin letter or digit, and says why on both surfaces',
+    async (query) => {
+      const result = await runToolContract(listReferenceTool, {
+        topic: 'countries',
+        name_contains: query,
+      });
+      const notice = `No country name or code matched "${query}". Names match UNHCR's English spellings and codes match ISO3, ISO2, or UNHCR codes, so name_contains needs Latin letters or digits. Call unhcr_list_reference (topic countries) without name_contains to browse the full list.`;
+      expect(structuredOf(result)).toEqual({
+        topic: 'countries',
+        countries: [],
+        totalCount: 0,
+        notice,
+      });
+      const text = textOf(result.content);
+      expect(text).toContain('_No countries._');
+      expect(text).toContain(notice);
+      expect(text).toContain('**0 total**');
+    },
+  );
+
   it('treats a blank name_contains as unset', async () => {
     const ctx = createMockContext({ errors: listReferenceTool.errors });
     const result = await listReferenceTool.handler(

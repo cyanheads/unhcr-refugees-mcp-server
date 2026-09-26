@@ -2,7 +2,7 @@
  * @fileoverview Tests for the static vocabulary: population types and the
  * output columns carrying them, asylum code lists and the filter vocabularies
  * drawn from them, every dataset in the coverage table, the demographic and
- * folded types, footnote type sets, and the attribution UNHCR's terms fix.
+ * folded types, and the attribution UNHCR's terms fix.
  * @module tests/services/unhcr/codes.test
  */
 
@@ -17,9 +17,7 @@ import {
   DECISION_LEVELS,
   DEMOGRAPHIC_TYPES,
   FOLDED_TYPES,
-  POPULATION_FOOTNOTE_TYPES,
   POPULATION_TYPES,
-  SOLUTIONS_FOOTNOTE_TYPES,
   TERMS_URL,
 } from '@/services/unhcr/codes.js';
 import { POPULATION_FIELDS, SOLUTIONS_FIELDS } from '@/services/unhcr/types.js';
@@ -185,33 +183,14 @@ describe('asylum and demographics filter vocabularies', () => {
   });
 
   it('folds ROC into REF and IOC into IDP, the types whose columns count them', () => {
-    expect(FOLDED_TYPES).toEqual({ REF: 'ROC', IDP: 'IOC' });
+    expect([...FOLDED_TYPES]).toEqual([
+      ['REF', 'ROC'],
+      ['IDP', 'IOC'],
+    ]);
     const byCode = new Map(POPULATION_TYPES.map((type) => [type.code, type]));
-    for (const [carrier, folded] of Object.entries(FOLDED_TYPES)) {
+    for (const [carrier, folded] of FOLDED_TYPES) {
       expect(byCode.get(folded)?.field).toBeNull();
       expect(byCode.get(carrier)?.field).not.toBeNull();
     }
-  });
-});
-
-describe('footnote type sets', () => {
-  it('matches population footnotes on the stock types plus returns', () => {
-    expect([...POPULATION_FOOTNOTE_TYPES]).toEqual([
-      'REF',
-      'ROC',
-      'ASY',
-      'OIP',
-      'IDP',
-      'IOC',
-      'STA',
-      'OOC',
-      'HST',
-      'RET',
-      'RDP',
-    ]);
-  });
-
-  it('matches solutions footnotes on returns, resettlement, and naturalisation', () => {
-    expect([...SOLUTIONS_FOOTNOTE_TYPES]).toEqual(['RET', 'RST', 'NAT', 'RDP']);
   });
 });

@@ -8,7 +8,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { DATAFRAME_NAME, getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  DATAFRAME_NAME,
+  DATAFRAME_NAME_LENGTH,
+  getCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeDropTool = tool('unhcr_dataframe_drop', {
   title: 'Drop a staged dataframe',
@@ -19,9 +23,10 @@ export const dataframeDropTool = tool('unhcr_dataframe_drop', {
   input: z.object({
     name: z
       .string()
+      .max(DATAFRAME_NAME_LENGTH)
       .regex(DATAFRAME_NAME)
       .describe(
-        'Dataframe to drop, as df_XXXXX_XXXXX (uppercase letters and digits), as unhcr_dataframe_describe lists it.',
+        'Dataframe to drop, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name a unhcr_get_* result returned, or a register_as name.',
       ),
   }),
 

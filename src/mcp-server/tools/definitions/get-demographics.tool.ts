@@ -12,13 +12,8 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import {
-  DEMOGRAPHIC_TYPES,
-  FOLDED_TYPES,
-  POPULATION_FOOTNOTE_TYPES,
-  POPULATION_TYPES,
-} from '@/services/unhcr/codes.js';
-import { matchFootnotes } from '@/services/unhcr/footnote-match.js';
+import { DEMOGRAPHIC_TYPES, POPULATION_TYPES } from '@/services/unhcr/codes.js';
+import { matchFootnotes, withFolded } from '@/services/unhcr/footnote-match.js';
 import { pickIdentity } from '@/services/unhcr/normalize.js';
 import type { DemographicsField, DemographicsRow, RowIdentity } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
@@ -29,6 +24,7 @@ import {
   footnoteSchema,
   identityCells,
   identityFields,
+  normalizationNotes,
   renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
@@ -108,23 +104,15 @@ const typeLabel = (code: string | null): string => {
   return cell(label ? `${code} ${label}` : code);
 };
 
-function dataNotes(options: { unexpectedValues: number; yearlessRows: number }): string[] {
-  const notes = [
+function dataNotes(counts: { unexpectedValues: number; yearlessRows: number }): string[] {
+  return [
     'Counts are year-end stocks by population type: people in each situation on 31 December. Rows of type RET and RDP count returns during the year (flows).',
     'Coverage is partial. sex_disaggregated_share is (female_total + male_total) ÷ total, the share of the row UNHCR could break down by sex; the *_unknown_age bands count people of known sex and unknown age. Where a row has no breakdown (disaggregated false), every band is null: UNHCR publishes 0 there, which means not broken down, not zero people.',
     'Demographic totals come from a separate collection and can differ from unhcr_get_population for the same scope and year.',
     'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
     'null means UNHCR has no breakdown for the row, or marks the figure not applicable or not collected; it is never zero.',
+    ...normalizationNotes(counts),
   ];
-  if (options.unexpectedValues > 0) {
-    notes.push(
-      `${options.unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
-    );
-  }
-  if (options.yearlessRows > 0) {
-    notes.push(`${options.yearlessRows} upstream row(s) carried no usable year and were left out.`);
-  }
-  return notes;
 }
 
 const bandSchema = (description: string) =>
@@ -275,18 +263,14 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
       .map(toOutputRow)
       .sort((a, b) => typeRank(a.population_type) - typeRank(b.population_type));
 
-    const footnoteTypes =
-      types.length > 0
-        ? types.flatMap((type) => (FOLDED_TYPES[type] ? [type, FOLDED_TYPES[type]] : [type]))
-        : POPULATION_FOOTNOTE_TYPES;
-    const matched = matchFootnotes(footnotes, rows, footnoteTypes);
+    // Each row is one population type, so the filter narrows the footnotes with the rows.
+    const matched = matchFootnotes(footnotes, rows, (row) => withFolded(row.population_type));
     const filterEmptied = types.length > 0 && fetched.rows.length > 0 && rows.length === 0;
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_demographics',
       datasetLabel: 'demographics',
       queryParams: { ...input },
-      dimensions: scope,
-      window: { clamps: scope.clamps, yearFrom: scope.query.yearFrom, yearTo: scope.query.yearTo },
+      scope,
       rows,
       fetchedRows: fetched.rows.length + fetched.skippedRows,
       complete: fetched.complete,
@@ -306,21 +290,16 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
       emptyNotice: filterEmptied
         ? `No rows matched population_types=${types.join(', ')}. Drop the filter or check the codes with unhcr_list_reference (topic population_types).`
         : undefined,
+      yearlessRows: fetched.skippedRows,
     });
 
     return {
-      rows: finished.rows,
-      total_rows: finished.total_rows,
-      complete: fetched.complete,
+      ...finished,
       measure: 'stock' as const,
-      applied_scope: scope.applied,
-      latest_year: scope.coverage.latestYear,
-      ...(finished.dataset && { dataset: finished.dataset }),
       data_notes: dataNotes({
         unexpectedValues: fetched.unexpectedValues,
         yearlessRows: fetched.skippedRows,
       }),
-      attribution: finished.attribution,
       footnotes: matched.footnotes,
       footnotes_total: matched.total,
     };

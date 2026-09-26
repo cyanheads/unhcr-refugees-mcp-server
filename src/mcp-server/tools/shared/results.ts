@@ -3,14 +3,17 @@
  * result, cut it to `limit`, stage it as a dataframe when it overflows (or on
  * request), compose one notice, and disclose truncation. Staging is
  * best-effort: a failure — the region-map load included — keeps the inline
- * rows and says so in the notice; only a cancelled request rethrows.
+ * rows and says so in the notice; only a cancelled request rethrows. The
+ * failure's cause goes to the server-only log, not the client-visible one.
  * @module mcp-server/tools/shared/results
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
+import { logger, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import {
   dataframeGuidance,
+  errorText,
   getCanvasBridge,
   type StagedDataset,
 } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -22,8 +25,8 @@ import {
 } from '@/services/unhcr/codes.js';
 import type { RowIdentity } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { type Attribution, yearSpan } from './outputs.js';
-import type { ResolvedDimensions } from './scope.js';
+import { type AppliedScope, type Attribution, yearSpan } from './outputs.js';
+import type { ResolvedScope } from './scope.js';
 
 /** The attribution object every result carrying UNHCR figures returns. */
 export function buildAttribution(providers: readonly Provider[]): Attribution {
@@ -103,17 +106,17 @@ export interface FinishInput<R extends RowIdentity> {
   countFields: readonly (keyof R & string)[];
   /** Dataset name used in the empty-result notice ("population", "solutions"). */
   datasetLabel: string;
-  dimensions: ResolvedDimensions;
   /**
-   * Replaces the scope-based empty-result notice, for a result a tool-local
-   * code filter or the unit skip emptied after UNHCR returned rows.
+   * Replaces the default empty-result notice, for a result a tool-local code
+   * filter or the unit skip emptied after UNHCR returned rows.
    */
   emptyNotice?: string | undefined;
   /**
    * Upstream rows the fetch returned, which the partial-result notice names:
-   * the dataset's `rows` plus its `skippedRows`, since the year-less rows the
-   * service left out were fetched too. Aggregation and code filters make
-   * `rows` here a different count.
+   * each fetched series' `rows` plus its `skippedRows`, since the year-less
+   * rows the service left out were fetched too. A tool that joins companion
+   * series counts every series it fetched, since any one of them can hit the
+   * cap. Aggregation and code filters make `rows` here a different count.
    */
   fetchedRows: number;
   limit: number;
@@ -122,29 +125,46 @@ export interface FinishInput<R extends RowIdentity> {
   providers: Provider[];
   queryParams: Record<string, unknown>;
   rows: readonly R[];
+  /**
+   * The resolved scope: its codes, window, and clamps shape the notice, and
+   * it fills `applied_scope` and `latest_year`.
+   */
+  scope: ResolvedScope;
   sortBy: keyof R;
   sourceTool: string;
   stage: boolean;
-  window: { clamps: string[]; yearFrom: number; yearTo: number };
+  /**
+   * Upstream rows left out for want of a usable year (the fetched series'
+   * `skippedRows`). When a result is empty and this is above 0, the
+   * empty-result notice says UNHCR did return rows instead of suggesting a
+   * wider window.
+   */
+  yearlessRows: number;
 }
 
 /** The shared part of a data tool's output. */
 export interface FinishedRows<R> {
+  applied_scope: AppliedScope;
   attribution: Attribution;
+  complete: boolean;
   dataset?: StagedDataset;
+  latest_year: number;
   rows: R[];
   total_rows: number;
 }
 
-/** The empty-result notice for a scope, per the design's fragment table. */
-function emptyResultNotice(
-  dimensions: ResolvedDimensions,
-  datasetLabel: string,
-  window: { yearFrom: number; yearTo: number },
-): string {
-  const years = yearSpan(window.yearFrom, window.yearTo);
-  const origin = dimensions.origin.codes;
-  const asylum = dimensions.asylum.codes;
+/** The default empty-result notice, per the design's fragment table. */
+function emptyResultNotice<R extends RowIdentity>({
+  datasetLabel,
+  scope,
+  yearlessRows,
+}: FinishInput<R>): string {
+  const years = yearSpan(scope.query.yearFrom, scope.query.yearTo);
+  if (yearlessRows > 0) {
+    return `UNHCR returned ${yearlessRows} row(s) for this scope, all without a usable year, so none could be placed in ${years}; they were left out rather than guessed.`;
+  }
+  const origin = scope.origin.codes;
+  const asylum = scope.asylum.codes;
   if (origin.length > 0 && asylum.length > 0) {
     return `No rows for origin ${origin.join(', ')} in asylum ${asylum.join(', ')} in ${years}. Origin is where people fled from and asylum where they sought or hold protection (for returns, the country they returned from); swapping them is the common miss.`;
   }
@@ -205,10 +225,12 @@ async function stage<R extends RowIdentity>(
     });
   } catch (error) {
     if (ctx.signal.aborted) throw error;
-    ctx.log.warning('Region data for staging could not load; the inline rows stand', {
-      sourceTool: input.sourceTool,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const message = 'Region data for staging could not load; the inline rows stand';
+    ctx.log.warning(message, { sourceTool: input.sourceTool });
+    logger.warning(
+      message,
+      withExtra(ctx, { sourceTool: input.sourceTool, error: errorText(error) }),
+    );
     return;
   }
 }
@@ -226,11 +248,9 @@ export async function finishRows<R extends RowIdentity>(
   const total = sorted.length;
   const rows = sorted.slice(0, input.limit);
   const overflow = total > input.limit;
-  const fragments = [...input.window.clamps];
+  const fragments = [...input.scope.clamps];
   if (total === 0) {
-    fragments.push(
-      input.emptyNotice ?? emptyResultNotice(input.dimensions, input.datasetLabel, input.window),
-    );
+    fragments.push(input.emptyNotice ?? emptyResultNotice(input));
   }
   fragments.push(...input.notices);
   if (!input.complete) {
@@ -264,7 +284,10 @@ export async function finishRows<R extends RowIdentity>(
   return {
     rows,
     total_rows: total,
-    attribution: buildAttribution(input.providers),
+    complete: input.complete,
+    applied_scope: input.scope.applied,
+    latest_year: input.scope.coverage.latestYear,
     ...(dataset && { dataset }),
+    attribution: buildAttribution(input.providers),
   };
 }

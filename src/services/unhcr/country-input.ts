@@ -57,13 +57,15 @@ export function buildCountryTable(countries: readonly Country[]): CountryTable {
 
 /**
  * Split a filter value into trimmed, uppercased, de-duplicated codes. A string
- * splits on commas and whitespace; blank entries are ignored, so an empty list
- * means the dimension is unset. A string that splits into more codes than the
- * cap is rejected here, since the array form's cap is enforced by the schema.
+ * splits on commas, whitespace, square brackets, and quotes, none of which a
+ * country code contains, so a list a client encoded into a string
+ * (`'["DEU","AUT"]'`) yields its codes. Blank entries are ignored, so an empty
+ * list means the dimension is unset. A string that splits into more codes than
+ * the cap is rejected here, since the array form's cap is enforced by the schema.
  */
 export function parseCodeList(value: string | string[] | undefined, field: string): string[] {
   if (value === undefined) return [];
-  const parts = typeof value === 'string' ? value.split(/[\s,]+/) : value;
+  const parts = typeof value === 'string' ? value.split(/[\s,[\]"']+/) : value;
   const codes = [
     ...new Set(parts.map((part) => part.trim().toUpperCase()).filter((part) => part !== '')),
   ];

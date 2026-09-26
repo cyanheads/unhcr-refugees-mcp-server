@@ -1,26 +1,34 @@
 /**
- * @fileoverview unhcr_dataframe_describe — lists the `df_<id>` dataframes the
- * unhcr_get_* tools staged, with provenance, expiry, completeness, the
+ * @fileoverview unhcr_dataframe_describe — describes the `df_<id>` dataframes
+ * the unhcr_get_* tools staged, with provenance, expiry, completeness, the
  * third-party series they carry, and their column schema. Expired entries are
- * swept before the listing.
+ * swept first. Where the deployment turns listing off (HTTP without
+ * authentication, where every caller shares one tenant), a call without `name`
+ * fails `listing_unavailable` and only lookups by exact name answer.
  * @module mcp-server/tools/definitions/dataframe-describe
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { DATAFRAME_NAME, getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  DATAFRAME_NAME,
+  DATAFRAME_NAME_LENGTH,
+  getCanvasBridge,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { blankAsUnset } from '../shared/inputs.js';
 import { fence, inline } from '../shared/markdown.js';
 
 export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
   title: 'Describe staged dataframes',
   description:
-    'List the dataframes (df_XXXXX_XXXXX) staged by the unhcr_get_* tools — any response carrying a dataset handle staged its full result here. Each entry gives the source tool, query parameters, creation and expiry time, row count, whether the upstream fetch was complete, and the column schema. Read the columns here before writing SQL for unhcr_dataframe_query.',
+    'Describe a dataframe (df_XXXXX_XXXXX) staged by the unhcr_get_* tools — any response carrying a dataset handle staged its full result here — or list them all where this deployment allows listing. Each entry gives the source tool, query parameters, creation and expiry time, row count, whether the upstream fetch was complete, and the column schema. Read the columns here before writing SQL for unhcr_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
-    name: blankAsUnset(z.string().regex(DATAFRAME_NAME).optional()).describe(
-      'One dataframe to describe, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name a unhcr_get_* result returned, or a register_as name. Omit to list every staged dataframe.',
+    name: blankAsUnset(
+      z.string().max(DATAFRAME_NAME_LENGTH).regex(DATAFRAME_NAME).optional(),
+    ).describe(
+      'One dataframe to describe, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name a unhcr_get_* result returned, or a register_as name. Omit to list every staged dataframe; a deployment that serves unauthenticated callers over HTTP turns listing off, and there the name is required.',
     ),
   }),
 
@@ -87,6 +95,14 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
       recovery:
         "Dataframes are unavailable in this deployment, so retrying will not help; narrow the unhcr_get_* call's filters or year window so its rows fit inline.",
     },
+    {
+      reason: 'listing_unavailable',
+      code: JsonRpcErrorCode.Forbidden,
+      severity: 'notice',
+      when: "name was omitted on a deployment that serves unauthenticated callers over HTTP, where a listing would show other callers' dataframes",
+      recovery:
+        'Pass the exact dataframe name: the dataset.name a unhcr_get_* result returned, or your register_as name.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -98,12 +114,22 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         ctx.recoveryFor('canvas_unavailable'),
       );
     }
+    if (input.name === undefined && !bridge.listingEnabled) {
+      throw ctx.fail(
+        'listing_unavailable',
+        'Listing every staged dataframe is turned off in this deployment; describe one by name.',
+        ctx.recoveryFor('listing_unavailable'),
+      );
+    }
 
     const entries = await bridge.describe(ctx, input.name);
     if (entries.length === 0) {
+      const next = bridge.listingEnabled
+        ? 'Call unhcr_dataframe_describe without name to list what is staged, or re-run'
+        : 'Re-run';
       ctx.enrich.notice(
         input.name
-          ? `No dataframe named ${input.name}; it may have expired. Call unhcr_dataframe_describe without name to list what is staged, or re-run the unhcr_get_* call that produced it.`
+          ? `No dataframe named ${input.name}; it may have expired or been evicted to make room for newer dataframes. ${next} the unhcr_get_* call that produced it.`
           : 'No dataframes are staged. A unhcr_get_* call stages its full result when it exceeds limit or when stage is true.',
       );
     }

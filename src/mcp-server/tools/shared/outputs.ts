@@ -7,6 +7,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { DEFAULT_STAGED_ROW_BUDGET } from '@/services/canvas-bridge/canvas-bridge.js';
 import { type ASYLUM_CODES, asylumCodeLabel } from '@/services/unhcr/codes.js';
 import type { MatchedFootnote } from '@/services/unhcr/footnote-match.js';
 import type { RowIdentity } from '@/services/unhcr/types.js';
@@ -96,11 +97,20 @@ export const attributionSchema = z
 
 export type Attribution = z.infer<typeof attributionSchema>;
 
+/** The staging budget in prose, for descriptions and recovery hints. */
+export const STAGING_BUDGET = `${DEFAULT_STAGED_ROW_BUDGET.toLocaleString('en-US')}-row`;
+
 export const datasetSchema = z
   .object({
     name: z.string().describe('Dataframe handle (df_XXXXX_XXXXX) for unhcr_dataframe_query.'),
     row_count: z.number().int().describe('Rows staged.'),
     expires_at: z.string().describe('ISO 8601 time the staged table expires.'),
+    evicted: z
+      .array(z.string())
+      .optional()
+      .describe(
+        `Older dataframes dropped, oldest first, to keep the staged total within the ${STAGING_BUDGET} budget; they can no longer be queried. Present only when staging this result evicted any.`,
+      ),
   })
   .describe(
     'Present when the full result was staged as a dataframe; read its columns with unhcr_dataframe_describe, then query it with unhcr_dataframe_query.',
@@ -125,7 +135,12 @@ export const footnoteSchema = z
     population_types: z
       .array(z.string())
       .describe('Population-type codes the caveat applies to (decode with unhcr_list_reference).'),
-    rows_matched: z.number().int().describe('Rows of the full result the caveat applies to.'),
+    rows_matched: z
+      .number()
+      .int()
+      .describe(
+        'Rows of the full result the caveat applies to: rows in its years and countries that carry one of its population types.',
+      ),
   })
   .describe('One UNHCR data caveat that applies to rows of this result.');
 
@@ -167,6 +182,23 @@ export const dataEnrichment = {
   cap: z.number().optional().describe('The limit that was applied.'),
 };
 
+/** `data_notes` lines for what normalization could not keep: null-read values, then dropped rows. */
+export function normalizationNotes(counts: {
+  unexpectedValues: number;
+  yearlessRows: number;
+}): string[] {
+  const notes: string[] = [];
+  if (counts.unexpectedValues > 0) {
+    notes.push(
+      `${counts.unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
+    );
+  }
+  if (counts.yearlessRows > 0) {
+    notes.push(`${counts.yearlessRows} upstream row(s) carried no usable year and were left out.`);
+  }
+  return notes;
+}
+
 /** Render a row's origin or asylum cell: name plus both codes, or "all (summed)". */
 export function countryCell(
   iso3: string | null,
@@ -194,11 +226,17 @@ const describeDimension = (dimension: string, scope: AppliedScope['origin']): st
   return `${dimension} ${scope.mode}${codes}`;
 };
 
+/** The line naming the dataframes a staging call evicted to stay within the budget. */
+export const renderEvicted = (evicted: readonly string[]): string =>
+  `**Evicted to stay within the staging budget:** ${evicted.join(', ')}`;
+
 /** Render the shared header lines: scope, coverage, completeness, staging. */
 export function renderResultHeader(result: {
   applied_scope: AppliedScope;
   complete: boolean;
-  dataset?: { expires_at: string; name: string; row_count: number } | undefined;
+  dataset?:
+    | { evicted?: string[] | undefined; expires_at: string; name: string; row_count: number }
+    | undefined;
   latest_year: number;
   measure: string;
   rows: readonly unknown[];
@@ -214,6 +252,7 @@ export function renderResultHeader(result: {
     lines.push(
       `**Dataset:** ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})`,
     );
+    if (result.dataset.evicted) lines.push(renderEvicted(result.dataset.evicted));
   }
   return lines;
 }

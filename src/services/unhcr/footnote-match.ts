@@ -1,13 +1,15 @@
 /**
  * @fileoverview Parse UNHCR's footnotes and match them to result rows locally.
- * A footnote attaches when its population types overlap the tool's types, its
- * year spec covers the row year, and every country it names (by ISO3, never by
- * display name) equals that row's country. A footnote naming a country never
- * attaches to a row where that dimension is summed; one naming no country
- * attaches everywhere. Only footnotes matching at least one row are returned.
+ * A footnote attaches to a row when the row carries one of its population
+ * types, its year spec covers the row year, and every country it names (by
+ * ISO3, never by display name) equals that row's country. A footnote naming a
+ * country never attaches to a row where that dimension is summed; one naming
+ * no country attaches everywhere. Only footnotes matching at least one row are
+ * returned.
  * @module services/unhcr/footnote-match
  */
 
+import { FOLDED_TYPES, POPULATION_TYPES } from './codes.js';
 import type { RawRow } from './types.js';
 
 /** A parsed footnote. */
@@ -96,54 +98,89 @@ export function footnoteSpan(footnotes: readonly Footnote[]): [number, number] |
   return Number.isFinite(first) ? [first, last] : undefined;
 }
 
+/** A population type plus the type counted inside it: REF carries ROC, IDP carries IOC. */
+export function withFolded(code: string | null): string[] {
+  if (!code) return [];
+  const folded = FOLDED_TYPES.get(code);
+  return folded ? [code, folded] : [code];
+}
+
+/** The footnote types each count column carries, keyed by output column. */
+const COLUMN_TYPES = new Map(
+  POPULATION_TYPES.flatMap(({ code, field }): [string, string[]][] =>
+    field ? [[field, withFolded(code)]] : [],
+  ),
+);
+
+/**
+ * The footnote types a population or solutions row carries: those of each
+ * count column above zero, plus the types folded into them. A column that is
+ * zero or null carries none, and columns no population type maps to are
+ * ignored.
+ */
+export function typesWithCounts(row: object): string[] {
+  return Object.entries(row).flatMap(([field, value]) =>
+    typeof value === 'number' && value > 0 ? (COLUMN_TYPES.get(field) ?? []) : [],
+  );
+}
+
 const coverageKey = (origin: string | null, asylum: string | null): string =>
   `${origin ?? ''}|${asylum ?? ''}`;
 
-/** Row counts per year under each key a footnote can name. */
-function indexRows(rows: readonly FootnoteRowKey[]): Map<string, Map<number, number>> {
-  const index = new Map<string, Map<number, number>>();
-  const bump = (key: string, year: number) => {
+/** Each row's footnote types, per year, under each key a footnote can name. */
+function indexRows<R extends FootnoteRowKey>(
+  rows: readonly R[],
+  typesOf: (row: R) => readonly string[],
+): Map<string, Map<number, (readonly string[])[]>> {
+  const index = new Map<string, Map<number, (readonly string[])[]>>();
+  const add = (key: string, year: number, types: readonly string[]) => {
     let years = index.get(key);
     if (!years) {
       years = new Map();
       index.set(key, years);
     }
-    years.set(year, (years.get(year) ?? 0) + 1);
+    const perYear = years.get(year);
+    if (perYear) perYear.push(types);
+    else years.set(year, [types]);
   };
   for (const row of rows) {
-    bump(coverageKey(null, null), row.year);
-    if (row.origin_iso3) bump(coverageKey(row.origin_iso3, null), row.year);
-    if (row.asylum_iso3) bump(coverageKey(null, row.asylum_iso3), row.year);
+    const types = typesOf(row);
+    if (types.length === 0) continue;
+    add(coverageKey(null, null), row.year, types);
+    if (row.origin_iso3) add(coverageKey(row.origin_iso3, null), row.year, types);
+    if (row.asylum_iso3) add(coverageKey(null, row.asylum_iso3), row.year, types);
     if (row.origin_iso3 && row.asylum_iso3) {
-      bump(coverageKey(row.origin_iso3, row.asylum_iso3), row.year);
+      add(coverageKey(row.origin_iso3, row.asylum_iso3), row.year, types);
     }
   }
   return index;
 }
 
 /**
- * Match footnotes to a full result. Country-specific footnotes come first, then
- * the ones naming no country, each group in UNHCR's order; the list is capped
- * at {@link FOOTNOTE_CAP} and `total` counts every match.
+ * Match footnotes to a full result. `typesOf` names the population types each
+ * row carries; a footnote counts only rows carrying one of its types.
+ * Country-specific footnotes come first, then the ones naming no country, each
+ * group in UNHCR's order; the list is capped at {@link FOOTNOTE_CAP} and
+ * `total` counts every match.
  */
-export function matchFootnotes(
+export function matchFootnotes<R extends FootnoteRowKey>(
   footnotes: readonly Footnote[],
-  rows: readonly FootnoteRowKey[],
-  toolTypes: readonly string[],
+  rows: readonly R[],
+  typesOf: (row: R) => readonly string[],
 ): { footnotes: MatchedFootnote[]; total: number } {
   if (rows.length === 0) return { footnotes: [], total: 0 };
-  const types = new Set(toolTypes);
-  const index = indexRows(rows);
+  const index = indexRows(rows, typesOf);
   const specific: MatchedFootnote[] = [];
   const general: MatchedFootnote[] = [];
 
   for (const note of footnotes) {
-    if (!note.populationTypes.some((type) => types.has(type))) continue;
     const years = index.get(coverageKey(note.originIso3, note.asylumIso3));
     if (!years) continue;
+    const noteTypes = new Set(note.populationTypes);
     let matched = 0;
-    for (const [year, count] of years) {
-      if (note.ranges.some(([from, to]) => year >= from && year <= to)) matched += count;
+    for (const [year, rowTypes] of years) {
+      if (!note.ranges.some(([from, to]) => year >= from && year <= to)) continue;
+      for (const types of rowTypes) if (types.some((type) => noteTypes.has(type))) matched++;
     }
     if (matched === 0) continue;
     const entry: MatchedFootnote = {

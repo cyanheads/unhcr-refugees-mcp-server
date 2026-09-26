@@ -8,8 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { SOLUTIONS_FOOTNOTE_TYPES } from '@/services/unhcr/codes.js';
-import { matchFootnotes } from '@/services/unhcr/footnote-match.js';
+import { matchFootnotes, typesWithCounts } from '@/services/unhcr/footnote-match.js';
 import { SOLUTIONS_FIELDS } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { blankAsUnset, resultInputs, scopeInputs } from '../shared/inputs.js';
@@ -20,6 +19,7 @@ import {
   footnoteSchema,
   identityCells,
   identityFields,
+  normalizationNotes,
   renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
@@ -28,23 +28,15 @@ import {
 import { finishRows } from '../shared/results.js';
 import { resolveScope } from '../shared/scope.js';
 
-function dataNotes(options: { unexpectedValues: number; yearlessRows: number }): string[] {
-  const notes = [
+function dataNotes(counts: { unexpectedValues: number; yearlessRows: number }): string[] {
+  return [
     'Counts are flows: events during each calendar year, not people present at year end.',
     'The asylum country means something different per column: for returned_refugees it is the country refugees returned from, for resettlement the country they were resettled to, and for naturalisation the country that naturalised them. returned_idps sits on the origin country itself.',
     'Naturalisation is an incomplete proxy for local integration.',
     'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
     'null means the figure was not collected for that country and year; it is not zero.',
+    ...normalizationNotes(counts),
   ];
-  if (options.unexpectedValues > 0) {
-    notes.push(
-      `${options.unexpectedValues} upstream value(s) were neither a number nor "-" and are reported as null.`,
-    );
-  }
-  if (options.yearlessRows > 0) {
-    notes.push(`${options.yearlessRows} upstream row(s) carried no usable year and were left out.`);
-  }
-  return notes;
 }
 
 export const getSolutionsTool = tool('unhcr_get_solutions', {
@@ -159,13 +151,12 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       service.solutions(scope.query, ctx),
       service.footnotes(ctx),
     ]);
-    const matched = matchFootnotes(footnotes, solutions.rows, SOLUTIONS_FOOTNOTE_TYPES);
+    const matched = matchFootnotes(footnotes, solutions.rows, typesWithCounts);
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_solutions',
       datasetLabel: 'solutions',
       queryParams: { ...input },
-      dimensions: scope,
-      window: { clamps: scope.clamps, yearFrom: scope.query.yearFrom, yearTo: scope.query.yearTo },
+      scope,
       rows: solutions.rows,
       fetchedRows: solutions.rows.length + solutions.skippedRows,
       complete: solutions.complete,
@@ -175,21 +166,16 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       countFields: SOLUTIONS_FIELDS,
       providers: [],
       notices: [],
+      yearlessRows: solutions.skippedRows,
     });
 
     return {
-      rows: finished.rows,
-      total_rows: finished.total_rows,
-      complete: solutions.complete,
+      ...finished,
       measure: 'flow' as const,
-      applied_scope: scope.applied,
-      latest_year: scope.coverage.latestYear,
-      ...(finished.dataset && { dataset: finished.dataset }),
       data_notes: dataNotes({
         unexpectedValues: solutions.unexpectedValues,
         yearlessRows: solutions.skippedRows,
       }),
-      attribution: finished.attribution,
       footnotes: matched.footnotes,
       footnotes_total: matched.total,
     };

@@ -3,13 +3,17 @@
  * Keeps one shared canvas per tenant (its id in `ctx.state` under
  * `canvas-id`), mints `df_XXXXX_XXXXX` table names, records provenance and
  * expiry in `ctx.state` (`df-meta/<name>`), and lazily sweeps expired
- * metadata on every operation. Registration is best-effort: any failure logs a
- * warning and returns nothing, so the calling data tool keeps its inline rows.
- * A `ConfigurationError` from the lazy DuckDB load (the native binding is
+ * metadata on every operation. Each tenant's staged rows are held to a budget:
+ * once a new dataframe exists, the oldest others are evicted until the total
+ * fits. Registration is best-effort: any failure logs a warning and returns
+ * nothing, so the calling data tool keeps its inline rows. A
+ * `ConfigurationError` from the lazy DuckDB load (the native binding is
  * absent, as in the `.mcpb` bundle) is latched once as "canvas unavailable",
  * and every later call takes the canvas-off path. Queries run through the
  * framework's read-only SQL gate with system catalogs denied, and the gate's
- * rejections are rebuilt with this server's recovery hints.
+ * rejections are rebuilt with this server's recovery hints. Engine error text
+ * goes to the server-only logger; `ctx.log` reaches the client, so it gets
+ * fixed messages.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -25,8 +29,9 @@ import {
   McpError,
   notFound,
   serviceUnavailable,
+  validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
+import { idGenerator, logger, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import type { Provider } from '@/services/unhcr/codes.js';
 
 /** Provenance and schema for one staged dataframe, persisted in `ctx.state`. */
@@ -46,9 +51,20 @@ export interface DataframeMeta {
 
 /** What a data tool reports about a staged result (`dataset` output field). */
 export interface StagedDataset {
+  /** Dataframes dropped, oldest first, to keep the tenant within its staging budget. */
+  evicted?: string[];
   expires_at: string;
   name: string;
   row_count: number;
+}
+
+/** Construction options for {@link CanvasBridge}. */
+export interface CanvasBridgeOptions {
+  /** `false` refuses to list every staged dataframe; lookups by name still work. Default `true`. */
+  listing?: boolean;
+  /** Most rows a tenant may hold staged at once. Default {@link DEFAULT_STAGED_ROW_BUDGET}. */
+  rowBudget?: number;
+  ttlMs: number;
 }
 
 /** Input to {@link CanvasBridge.register}. */
@@ -70,6 +86,8 @@ export interface BridgeQueryOptions {
 
 /** Result of {@link CanvasBridge.query}. */
 export interface BridgeQueryResult {
+  /** Dataframes the `registerAs` result evicted to keep the tenant within its staging budget. */
+  evicted?: string[];
   /** Metadata of the dataframe `registerAs` created, when set. */
   meta?: DataframeMeta;
   /** Union of the providers recorded for every dataframe the SQL references. */
@@ -79,6 +97,14 @@ export interface BridgeQueryResult {
 
 /** Shape of a minted dataframe name. */
 export const DATAFRAME_NAME = /^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/;
+/** Length of every name {@link DATAFRAME_NAME} matches, as the explicit bound on name inputs. */
+export const DATAFRAME_NAME_LENGTH = 14;
+/**
+ * Rows one tenant may hold staged across all its dataframes: twice the largest
+ * `UNHCR_MAX_ROWS`, so the biggest stage a data tool can make still leaves
+ * room for others.
+ */
+export const DEFAULT_STAGED_ROW_BUDGET = 1_000_000;
 
 const META_PREFIX = 'df-meta/';
 const CANVAS_ID_KEY = 'canvas-id';
@@ -129,22 +155,41 @@ export function dataframeGuidance(dataset: StagedDataset): string {
   return `Full set staged as ${dataset.name} (${dataset.row_count} rows). Use unhcr_dataframe_describe to inspect its columns, then unhcr_dataframe_query to analyze it with SQL.`;
 }
 
+/** An error's message, for the server-only log. */
+export const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const count = (n: number): string => n.toLocaleString('en-US');
+
 export class CanvasBridge {
   private latchedOff = false;
+  private readonly listing: boolean;
+  private readonly rowBudget: number;
+  private readonly ttlMs: number;
 
   constructor(
     private readonly canvas: DataCanvas,
-    private readonly options: { ttlMs: number },
-  ) {}
+    options: CanvasBridgeOptions,
+  ) {
+    this.listing = options.listing ?? true;
+    this.rowBudget = options.rowBudget ?? DEFAULT_STAGED_ROW_BUDGET;
+    this.ttlMs = options.ttlMs;
+  }
 
   /** `false` once the DuckDB binding has failed to load. */
   get available(): boolean {
     return !this.latchedOff;
   }
 
+  /** `false` when the deployment refuses to list every staged dataframe. */
+  get listingEnabled(): boolean {
+    return this.listing;
+  }
+
   /**
-   * Stage rows as a new `df_<id>` table. Returns `undefined` on any failure so
-   * the caller keeps its inline answer; only a cancelled request rethrows.
+   * Stage rows as a new `df_<id>` table, then evict the tenant's oldest others
+   * while its staged rows exceed the budget. Returns `undefined` on any failure
+   * so the caller keeps its inline answer; only a cancelled request rethrows.
    */
   async register(ctx: Context, options: RegisterOptions): Promise<StagedDataset | undefined> {
     if (this.latchedOff || options.rows.length === 0) return;
@@ -154,7 +199,7 @@ export class CanvasBridge {
       const tableName = this.mintName();
       const result = await instance.registerTable(tableName, options.rows, {
         schema: options.schema,
-        ttlMs: this.options.ttlMs,
+        ttlMs: this.ttlMs,
         signal: ctx.signal,
       });
       const createdAt = Date.now();
@@ -163,7 +208,7 @@ export class CanvasBridge {
         sourceTool: options.sourceTool,
         queryParams: options.queryParams,
         createdAt: new Date(createdAt).toISOString(),
-        expiresAt: new Date(createdAt + this.options.ttlMs).toISOString(),
+        expiresAt: new Date(createdAt + this.ttlMs).toISOString(),
         rowCount: result.rowCount,
         complete: options.complete,
         providers: options.providers,
@@ -175,13 +220,21 @@ export class CanvasBridge {
         rowCount: result.rowCount,
         sourceTool: options.sourceTool,
       });
-      return { name: meta.tableName, row_count: meta.rowCount, expires_at: meta.expiresAt };
+      const evicted = await this.evictOverBudget(ctx, instance, meta.tableName);
+      return {
+        name: meta.tableName,
+        row_count: meta.rowCount,
+        expires_at: meta.expiresAt,
+        ...(evicted.length > 0 && { evicted }),
+      };
     } catch (error) {
       if (ctx.signal.aborted) throw error;
-      ctx.log.warning('Dataframe staging failed; the inline rows stand', {
-        sourceTool: options.sourceTool,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const message = 'Dataframe staging failed; the inline rows stand';
+      ctx.log.warning(message, { sourceTool: options.sourceTool });
+      logger.warning(
+        message,
+        withExtra(ctx, { sourceTool: options.sourceTool, error: errorText(error) }),
+      );
       return;
     }
   }
@@ -202,7 +255,9 @@ export class CanvasBridge {
    * Run one read-only SELECT on the shared canvas. A referenced `df_<id>` that
    * is not staged fails as `missing_table` before the gate runs; the gate's own
    * rejections are rebuilt with the calling tool's recovery hints. With
-   * `registerAs`, the result is saved as a new dataframe with a fresh TTL.
+   * `registerAs`, the result is saved as a new dataframe with a fresh TTL and
+   * the budget evicts the oldest others; a result that alone exceeds the budget
+   * is dropped and fails `register_as_too_large`, evicting nothing.
    */
   async query(ctx: Context, sql: string, options: BridgeQueryOptions): Promise<BridgeQueryResult> {
     await this.sweepExpired(ctx);
@@ -210,11 +265,10 @@ export class CanvasBridge {
     for (const name of referencedDataframes(sql)) {
       const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
       if (!meta) {
-        throw notFound(`Dataframe ${name} is not staged; it may have expired.`, {
-          reason: 'missing_table',
-          tableName: name,
-          ...ctx.recoveryFor('missing_table'),
-        });
+        throw notFound(
+          `Dataframe ${name} is not staged; it may have expired or been evicted to make room for newer dataframes.`,
+          { reason: 'missing_table', tableName: name, ...ctx.recoveryFor('missing_table') },
+        );
       }
       referenced.push(meta);
     }
@@ -227,7 +281,7 @@ export class CanvasBridge {
         ...(options.preview !== undefined && { preview: options.preview }),
         ...(options.registerAs !== undefined && {
           registerAs: options.registerAs,
-          ttlMs: this.options.ttlMs,
+          ttlMs: this.ttlMs,
         }),
         denySystemCatalogs: true,
         signal: ctx.signal,
@@ -239,6 +293,20 @@ export class CanvasBridge {
     const providers = [...new Set(referenced.flatMap((meta) => meta.providers))].sort();
     if (!options.registerAs || !result.tableName) return { result, providers };
 
+    // On the registerAs path the provider counts the saved table, so rowCount is exact.
+    if (result.rowCount > this.rowBudget) {
+      await this.dropTable(ctx, instance, result.tableName);
+      throw validationError(
+        `The register_as result has ${count(result.rowCount)} rows, more than the ${count(this.rowBudget)}-row staging budget, so it was not saved.`,
+        {
+          reason: 'register_as_too_large',
+          rowCount: result.rowCount,
+          rowBudget: this.rowBudget,
+          ...ctx.recoveryFor('register_as_too_large'),
+        },
+      );
+    }
+
     const [info] = await instance.describe({ tableName: result.tableName });
     const createdAt = Date.now();
     const meta: DataframeMeta = {
@@ -246,14 +314,15 @@ export class CanvasBridge {
       sourceTool: 'unhcr_dataframe_query',
       queryParams: { sql },
       createdAt: new Date(createdAt).toISOString(),
-      expiresAt: new Date(createdAt + this.options.ttlMs).toISOString(),
+      expiresAt: new Date(createdAt + this.ttlMs).toISOString(),
       rowCount: result.rowCount,
       complete: referenced.every((parent) => parent.complete),
       providers,
       columnSchema: info?.columns ?? [],
     };
     await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
-    return { result, meta, providers };
+    const evicted = await this.evictOverBudget(ctx, instance, meta.tableName);
+    return { result, meta, providers, ...(evicted.length > 0 && { evicted }) };
   }
 
   /** Idempotent drop of the table and its metadata; `true` when either existed. */
@@ -289,15 +358,61 @@ export class CanvasBridge {
       if (meta.expiresAt > nowIso) continue;
       if (!this.latchedOff) {
         instance ??= await this.acquireSharedCanvas(ctx);
-        await instance.drop(meta.tableName).catch((error: unknown) => {
-          ctx.log.warning('Expired dataframe drop failed', {
-            tableName: meta.tableName,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
+        await this.dropTable(ctx, instance, meta.tableName);
       }
       await ctx.state.delete(key);
     }
+  }
+
+  /**
+   * Drop the tenant's oldest dataframes, never `keep`, until its staged rows
+   * fit the budget, deleting their metadata. Runs once `keep` exists, so its
+   * real row count is counted and the tables its SQL read have been read.
+   * Returns the evicted names, oldest first. The log line carries a count, not
+   * names: under a shared tenant they are other callers' handles.
+   */
+  private async evictOverBudget(
+    ctx: Context,
+    instance: CanvasInstance,
+    keep: string,
+  ): Promise<string[]> {
+    const staged: { key: string; meta: DataframeMeta }[] = [];
+    for await (const entry of this.iterateMeta(ctx)) staged.push(entry);
+    let total = staged.reduce((sum, { meta }) => sum + meta.rowCount, 0);
+    const evicted: string[] = [];
+    staged.sort((a, b) => a.meta.createdAt.localeCompare(b.meta.createdAt));
+    for (const { key, meta } of staged) {
+      if (total <= this.rowBudget) break;
+      if (meta.tableName === keep) continue;
+      await this.dropTable(ctx, instance, meta.tableName);
+      await ctx.state.delete(key);
+      total -= meta.rowCount;
+      evicted.push(meta.tableName);
+    }
+    if (evicted.length > 0) {
+      ctx.log.info('Dataframes evicted to stay within the staging budget', {
+        evictedCount: evicted.length,
+        stagedRows: total,
+        rowBudget: this.rowBudget,
+      });
+    }
+    return evicted;
+  }
+
+  /**
+   * Drop one table. A failure is logged, never thrown: the client-visible line
+   * is fixed, and the engine's text goes to the server-only log.
+   */
+  private async dropTable(
+    ctx: Context,
+    instance: CanvasInstance,
+    tableName: string,
+  ): Promise<void> {
+    await instance.drop(tableName).catch((error: unknown) => {
+      const message = 'Staged dataframe drop failed';
+      ctx.log.warning(message);
+      logger.warning(message, withExtra(ctx, { error: errorText(error) }));
+    });
   }
 
   private async *iterateMeta(ctx: Context): AsyncGenerator<{ key: string; meta: DataframeMeta }> {
@@ -370,7 +485,7 @@ let _bridge: CanvasBridge | undefined;
  */
 export function initCanvasBridge(
   canvas: DataCanvas | undefined,
-  options: { ttlMs: number } = { ttlMs: 86_400_000 },
+  options: CanvasBridgeOptions = { ttlMs: 86_400_000 },
 ): CanvasBridge | undefined {
   _bridge = canvas ? new CanvasBridge(canvas, options) : undefined;
   return _bridge;

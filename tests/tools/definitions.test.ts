@@ -5,7 +5,8 @@
  * wrapped by `disabledTool()` with the setting that turns it on — no other
  * tool's prose routes callers to the off-by-default drop tool, and the
  * annotations match the design. Later tools are not pinned, except for the
- * log severity every tool declares per error reason.
+ * log severity every tool declares per error reason and the length and size
+ * bound every string and array input carries.
  * @module tests/tools/definitions.test
  */
 
@@ -19,6 +20,40 @@ import { getPopulationTool } from '@/mcp-server/tools/definitions/get-population
 import { getSolutionsTool } from '@/mcp-server/tools/definitions/get-solutions.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
+import { DATAFRAME_NAME_LENGTH } from '@/services/canvas-bridge/canvas-bridge.js';
+
+/** The JSON Schema keywords the input-bounds walk reads. */
+interface SchemaNode {
+  anyOf?: SchemaNode[];
+  const?: unknown;
+  enum?: unknown[];
+  items?: SchemaNode;
+  maxItems?: number;
+  maxLength?: number;
+  oneOf?: SchemaNode[];
+  properties?: Record<string, SchemaNode>;
+  type?: string;
+}
+
+/** Paths of the string nodes with no maxLength (enums and constants aside) and array nodes with no maxItems. */
+function unboundedNodes(node: SchemaNode, path: string): string[] {
+  const unboundedString =
+    node.type === 'string' &&
+    node.maxLength === undefined &&
+    node.enum === undefined &&
+    node.const === undefined;
+  const unboundedArray = node.type === 'array' && node.maxItems === undefined;
+  return [
+    ...(unboundedString || unboundedArray ? [path] : []),
+    ...Object.entries(node.properties ?? {}).flatMap(([key, child]) =>
+      unboundedNodes(child, `${path}.${key}`),
+    ),
+    ...[...(node.anyOf ?? []), ...(node.oneOf ?? [])].flatMap((child, index) =>
+      unboundedNodes(child, `${path}|${index}`),
+    ),
+    ...(node.items ? unboundedNodes(node.items, `${path}[]`) : []),
+  ];
+}
 
 const WAVE_1 = [
   listReferenceTool,
@@ -105,6 +140,28 @@ describe('Wave 1 declared surface', () => {
   });
 });
 
+describe('input bounds', () => {
+  it('bounds every string and array input on every tool', () => {
+    const unbounded = buildToolDefinitions({ dropEnabled: true }).flatMap((tool) =>
+      unboundedNodes(z.toJSONSchema(tool.input, { io: 'input' }) as SchemaNode, tool.name),
+    );
+    expect(unbounded).toEqual([]);
+  });
+
+  it('caps every dataframe name input at the length of a df_XXXXX_XXXXX handle', () => {
+    expect('df_ABCDE_12345').toHaveLength(DATAFRAME_NAME_LENGTH);
+    const fields = [
+      [dataframeDescribeTool, 'name'],
+      [dataframeQueryTool, 'register_as'],
+      [dataframeDropTool, 'name'],
+    ] as const;
+    for (const [tool, field] of fields) {
+      const schema = z.toJSONSchema(tool.input, { io: 'input' }) as SchemaNode;
+      expect(schema.properties?.[field]?.maxLength, tool.name).toBe(DATAFRAME_NAME_LENGTH);
+    }
+  });
+});
+
 describe('error log severity', () => {
   /** Caller mistakes every data tool answers before or instead of fetching data. */
   const SCOPE_MISTAKES = {
@@ -132,13 +189,14 @@ describe('error log severity', () => {
       unhcr_get_asylum_applications: SCOPE_MISTAKES,
       unhcr_get_asylum_decisions: SCOPE_MISTAKES,
       unhcr_get_solutions: SCOPE_MISTAKES,
-      unhcr_dataframe_describe: { canvas_unavailable: 'warning' },
+      unhcr_dataframe_describe: { canvas_unavailable: 'warning', listing_unavailable: 'notice' },
       unhcr_dataframe_query: {
         canvas_unavailable: 'warning',
         missing_table: 'notice',
         invalid_sql: 'notice',
         sql_execution_error: 'notice',
         register_as_clash: 'notice',
+        register_as_too_large: 'notice',
         non_select_statement: 'notice',
         multi_statement: 'notice',
         denied_function: 'notice',
