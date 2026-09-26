@@ -1,6 +1,6 @@
 # unhcr-refugees-mcp-server - Directory Structure
 
-Generated on: 2026-09-26 19:06:08
+Generated on: 2026-09-26 22:21:54
 
 ```text
 unhcr-refugees-mcp-server/
@@ -24,6 +24,7 @@ unhcr-refugees-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -211,6 +212,7 @@ unhcr-refugees-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

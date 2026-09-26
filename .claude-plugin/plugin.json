@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "unhcr-refugees-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement.",
   "author": {
     "name": "cyanheads",
