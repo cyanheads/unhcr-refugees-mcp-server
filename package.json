@@ -2,7 +2,7 @@
   "name": "@cyanheads/unhcr-refugees-mcp-server",
   "version": "0.1.0",
   "mcpName": "io.github.cyanheads/unhcr-refugees-mcp-server",
-  "description": "UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present.",
+  "description": "Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

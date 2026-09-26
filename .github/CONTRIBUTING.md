@@ -2,13 +2,16 @@
 
 Thanks for using `unhcr-refugees-mcp-server`. Bugs, feature requests, and documentation gaps all belong in an issue — that's where they get read and picked up.
 
-Open one from the **Issues** tab and pick the **Bug Report** or **Feature Request** form. Both are structured, and filling in the fields is what makes an issue actionable. Anything that fits neither can be a plain issue — a half-formed idea in your own words is fine.
+- [Report a bug](https://github.com/cyanheads/unhcr-refugees-mcp-server/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/cyanheads/unhcr-refugees-mcp-server/issues/new?template=feature_request.yml)
+
+Both forms are structured, and filling in the fields is what makes an issue actionable. Anything that fits neither can be a plain issue — a half-formed idea in your own words is fine.
 
 ## Server bug or framework bug?
 
 `unhcr-refugees-mcp-server` is built on [@cyanheads/mcp-ts-core](https://github.com/cyanheads/mcp-ts-core), which handles transports, auth, config, logging, and telemetry. Sorting out which layer broke saves everyone a round-trip:
 
-- **This repo** — a tool returns wrong data, an upstream API call fails, a schema doesn't match reality, a description misleads the model.
+- **This repo** — a tool returns wrong data, a UNHCR API call fails, a schema doesn't match reality, a description misleads the model.
 - **[mcp-ts-core](https://github.com/cyanheads/mcp-ts-core/issues)** — a builder rejects valid input, `createApp()` fails on a valid config, a `Context` method behaves contrary to its docs, transport or auth misbehaves regardless of which tool you call.
 
 If you're not sure, file here and it'll get routed.
@@ -23,8 +26,8 @@ A few things that save a round-trip:
 
 ## What makes an issue actionable
 
-- Server version, `mcp-ts-core` version, runtime (Bun / Node / Workers), and transport (stdio / HTTP).
-- The tool, resource, or prompt involved, and the arguments you called it with.
+- Server version, `mcp-ts-core` version, runtime (Bun / Node), and transport (stdio / HTTP).
+- The tool involved and the arguments you called it with.
 - Actual vs expected behavior, verbatim: error messages and stack traces as they appeared.
 - For features: the use case first, then the API as you'd want to call it.
 
@@ -41,4 +44,4 @@ Read the relevant one before filing on a user's behalf.
 
 ## Security
 
-Don't open a public issue for a vulnerability. Report it privately — GitHub's **Security** tab → **Report a vulnerability**, or email the maintainer.
+Don't open a public issue for a vulnerability. See [SECURITY.md](./SECURITY.md) for private disclosure.

@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `framework-skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `framework-skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `framework-skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -57,77 +44,113 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Patterns
 
-### Tool
+### Data tool
+
+Every `unhcr_get_*` tool has the same shape, shown here condensed from `unhcr_get_solutions`: the shared `scopeInputs` / `resultInputs`, `resolveScope()` to validate codes, `expand`, and the year window before any data fetch, and `finishRows()` to sort, cut to `limit`, stage the overflow as a `df_<id>` dataframe, and write the one enrichment notice.
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { matchFootnotes, typesWithCounts } from '@/services/unhcr/footnote-match.js';
+import { SOLUTIONS_FIELDS } from '@/services/unhcr/types.js';
+import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { blankAsUnset, resultInputs, scopeInputs } from '../shared/inputs.js';
+import { countField, dataEnrichment, identityFields, sharedResultFields } from '../shared/outputs.js';
+import { finishRows } from '../shared/results.js';
+import { resolveScope } from '../shared/scope.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getSolutionsTool = tool('unhcr_get_solutions', {
+  title: 'UNHCR durable solutions',
+  description: 'Get durable solutions per year (1959 to the latest year) by country of origin and/or asylum: …',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
+    ...scopeInputs, // origin, asylum, expand, year_from, year_to
+    sort_by: blankAsUnset(z.enum(['year', 'returned_refugees', /* … */]).default('year')).describe('…'),
+    ...resultInputs, // limit, stage
   }),
+
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    rows: z.array(z.object({
+      ...identityFields,
+      returned_refugees: countField('Refugees who returned to their origin country during the year, …'),
+      // resettlement, naturalisation, returned_idps
+    }).describe('…')).describe('Inline rows, sorted, up to limit.'),
+    ...sharedResultFields, // total_rows, complete, measure, applied_scope, latest_year, dataset?, data_notes, attribution
+    // footnotes, footnotes_total
   }),
-  auth: ['inventory:read'],
+
+  enrichment: dataEnrichment,
+
+  errors: [
+    {
+      reason: 'unknown_country_code',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      when: "An origin or asylum value is not an ISO3 code in UNHCR's country list (after ISO2 normalization)",
+      recovery: 'Find the country with unhcr_list_reference (topic countries, name_contains) and pass its ISO3 code.',
+    },
+    // invalid_year_window, year_out_of_coverage, conflicting_scope, upstream_busy (thrownBy: 'service')
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const resolved = await resolveScope(input, 'solutions', ctx);
+    if (!resolved.ok) {
+      const { failure } = resolved;
+      throw ctx.fail(failure.reason, failure.message, {
+        ...ctx.recoveryFor(failure.reason),
+        ...failure.data,
+        ...(failure.hint && { recovery: { hint: failure.hint } }),
+      });
+    }
+
+    const { scope } = resolved;
+    const service = getUnhcrService();
+    const [solutions, footnotes] = await Promise.all([
+      service.solutions(scope.query, ctx),
+      service.footnotes(ctx),
+    ]);
+    const matched = matchFootnotes(footnotes, solutions.rows, typesWithCounts);
+    const finished = await finishRows(ctx, {
+      sourceTool: 'unhcr_get_solutions',
+      datasetLabel: 'solutions',
+      queryParams: { ...input },
+      scope,
+      rows: solutions.rows,
+      fetchedRows: solutions.rows.length + solutions.skippedRows,
+      complete: solutions.complete,
+      sortBy: input.sort_by,
+      limit: input.limit,
+      stage: input.stage,
+      countFields: SOLUTIONS_FIELDS,
+      providers: [],
+      notices: [],
+      yearlessRows: solutions.skippedRows,
+    });
+
+    return {
+      ...finished,
+      measure: 'flow' as const,
+      data_notes: dataNotes({ unexpectedValues: solutions.unexpectedValues, yearlessRows: solutions.skippedRows }),
+      footnotes: matched.footnotes,
+      footnotes_total: matched.total,
+    };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  // renderResultHeader → rows table → renderFootnotes → renderNotesAndAttribution
+  format: (result) => [{ type: 'text', text: /* … */ '' }],
 });
 ```
 
-### Resource
+Every result carrying UNHCR figures returns `attribution` (the data tools and `unhcr_dataframe_query`), with third-party series (UNRWA, IDMC) credited in `providers`. Upstream free text — country names, footnotes, nowcast source labels — is data: render it through the `shared/markdown.ts` helpers (`cell`, `inline`, `blockquote`), never raw.
 
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+### Resources and prompts
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+None. Every dataset takes query parameters, and `unhcr_list_reference` serves the reference vocabulary. The `add-resource` and `add-prompt` skills carry the patterns if that changes.
 
 ### Server config
 
@@ -137,23 +160,31 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  requestsPerSecond: z.coerce.number().int().min(1).max(10).default(4).describe('…'),
+  maxRows: z.coerce.number().int().min(10_000).max(500_000).default(150_000).describe('…'),
+  cacheMaxMb: z.coerce.number().int().min(0).default(64).describe('…'),
+  datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400).describe('…'),
+  dataframeDropEnabled: z.stringbool().default(false).describe('…'),
 });
 
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
+export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
+let _config: ServerConfig | undefined;
+export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    requestsPerSecond: 'UNHCR_REQUESTS_PER_SECOND',
+    maxRows: 'UNHCR_MAX_ROWS',
+    cacheMaxMb: 'UNHCR_CACHE_MAX_MB',
+    datasetTtlSeconds: 'UNHCR_DATASET_TTL_SECONDS',
+    dataframeDropEnabled: 'UNHCR_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+Every variable is optional: the upstream is keyless. `src/index.ts` loads `.env` and sets `process.env.CANVAS_PROVIDER_TYPE ??= 'duckdb'` before `createApp()`, so dataframes are on unless an operator sets `none`. A new variable goes into `.env.example`, `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table.
+
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`UNHCR_MAX_ROWS`) not the path (`maxRows`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -162,33 +193,41 @@ For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("
 `createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
 
 ```ts
+const config = getServerConfig();
+
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'unhcr-refugees-mcp-server',
+  title: 'unhcr-refugees-mcp-server', // must match the unscoped package name — enforced by lint:packaging
+  tools: buildToolDefinitions({ dropEnabled: config.dataframeDropEnabled }),
+  resources: [],
+  prompts: [],
+  instructions, // stocks vs flows, ISO3 origin/asylum, dataframes, null and rounding, attribution
+  sessionMode: 'stateless',
+  setup(core) {
+    initUnhcrService({
+      config: {
+        requestsPerSecond: config.requestsPerSecond,
+        maxRows: config.maxRows,
+        cacheMaxBytes: config.cacheMaxMb * 1024 * 1024,
+      },
+    });
+    initCanvasBridge(core.canvas, { ttlMs: config.datasetTtlSeconds * 1000 });
+  },
+  teardown() {
+    disposeUnhcrService();
+  },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`description` is never set here — the framework derives it from `package.json`. `instructions` is server-level orientation, sent on every `initialize` as session-level context: the stock/flow split, the ISO3 origin/asylum model, the dataframe hand-off, what null and rounding mean, and the attribution UNHCR's terms require. It names no latest year, since `latest_year` in each result carries that. Update it when a tool is added, renamed, or changes what it returns.
 
 ### Session posture and shutdown
 
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
+`sessionMode: 'stateless'` declares the HTTP session posture in `src/`, since no tool asks the caller for input mid-call. A deployment's `MCP_SESSION_MODE` still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). A tool that starts collecting input via `ctx.requestInput` needs `{ default: 'stateful', require: 'stateful' }` instead: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
 
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
+`teardown()` disposes the UNHCR request pacer. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
 
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
-
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
+`buildToolDefinitions()` registers `unhcr_dataframe_drop` live only when `UNHCR_DATAFRAME_DROP_ENABLED=true`; otherwise it wraps the tool with `disabledTool()`, which keeps it out of `tools/list` while the HTTP landing page still shows it with the setting that turns it on.
 
 ---
 
@@ -199,14 +238,9 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Here it holds the tenant's canvas id (`canvas-id`) and each staged dataframe's provenance and expiry (`df-meta/<name>`). Only `services/canvas-bridge` reads or writes it. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
 ---
 
@@ -258,21 +292,43 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point; loads .env, defaults CANVAS_PROVIDER_TYPE to duckdb
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # UNHCR_* env vars (Zod schema, lazy-parsed)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    unhcr/
+      unhcr-api-service.ts              # API client (init/accessor): request builder, paced fetch, page walk, reference data
+      response-cache.ts                 # LRU cache of response bodies (TTL + size budget)
+      normalize.ts                      # Row values and identities; "-" becomes null, never zero
+      country-input.ts                  # origin/asylum parsing: ISO3 accepted, ISO2 rewritten, UNHCR codes refused
+      codes.ts                          # Static vocabulary: population types, asylum codes, datasets, attribution
+      asylum-aggregate.ts               # Group-and-sum for the asylum tools; decision rates from summed counts
+      footnote-match.ts                 # Footnote parsing and row matching
+      types.ts                          # Raw and normalized row types
+    canvas-bridge/
+      canvas-bridge.ts                  # DataCanvas adapter: one canvas per tenant, df_<id> names, metadata in ctx.state
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    tools/
+      definitions/
+        index.ts                        # buildToolDefinitions(); unhcr_dataframe_drop via disabledTool() unless enabled
+        get-population.tool.ts          # unhcr_get_population
+        get-demographics.tool.ts        # unhcr_get_demographics
+        get-asylum-applications.tool.ts # unhcr_get_asylum_applications
+        get-asylum-decisions.tool.ts    # unhcr_get_asylum_decisions
+        get-solutions.tool.ts           # unhcr_get_solutions
+        list-reference.tool.ts          # unhcr_list_reference
+        dataframe-describe.tool.ts      # unhcr_dataframe_describe
+        dataframe-query.tool.ts         # unhcr_dataframe_query
+        dataframe-drop.tool.ts          # unhcr_dataframe_drop (opt-in)
+      shared/
+        inputs.ts                       # scopeInputs, resultInputs, blankAsUnset
+        outputs.ts                      # Shared output fields + markdown renderers (renderResultHeader, …)
+        scope.ts                        # resolveScope(): country codes, expand, year window
+        results.ts                      # finishRows(): sort, cut to limit, stage overflow, enrichment notice
+        markdown.ts                     # cell / inline / blockquote for upstream text
 ```
+
+No `resources/` or `prompts/` directories: the server registers neither.
 
 ---
 
@@ -356,12 +412,15 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
+| `bun run test:coverage` | Run tests with Istanbul coverage |
 | `bun run test:live` | Opt-in live suite (`tests/live/`): three keyless requests to api.unhcr.org re-checking the upstream behaviors the request builder relies on. Never part of `bun run test` |
+| `bun run start` | Production mode, transport from `MCP_TRANSPORT_TYPE` |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create or repair the GitHub Release on the `v<version>` tag, titled `v<version>: <tag subject>`, with `dist/*.mcpb` attached (used by `release-and-publish`) |
 
 **CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
@@ -369,7 +428,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -435,6 +494,9 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] A new data tool spreads `scopeInputs` / `resultInputs`, validates through `resolveScope()`, and ends in `finishRows()` — see *Data tool* above
+- [ ] Every result carrying UNHCR figures returns `attribution`, with UNRWA or IDMC series credited in `providers`
+- [ ] A new env var lands on every surface: `server-config.ts`, `.env.example`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/mcp.json`, and the README configuration table
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset

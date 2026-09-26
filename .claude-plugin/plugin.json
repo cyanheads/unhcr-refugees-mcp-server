@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "unhcr-refugees-mcp-server",
   "version": "0.1.0",
-  "description": "UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present.",
+  "description": "Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",

@@ -51,7 +51,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="unhcr-refugees-mcp-server"
-LABEL org.opencontainers.image.description="UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present."
+LABEL org.opencontainers.image.description="Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/unhcr-refugees-mcp-server"
