@@ -1,0 +1,9 @@
+{
+  "unhcr-refugees-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/unhcr-refugees-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}

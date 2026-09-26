@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "unhcr-refugees-mcp-server",
+  "version": "0.1.0",
+  "description": "UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/unhcr-refugees-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/unhcr-refugees-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "unhcr",
+    "refugees",
+    "asylum",
+    "displacement",
+    "idp",
+    "statelessness",
+    "humanitarian",
+    "migration",
+    "statistics",
+    "open-data"
+  ],
+  "mcpServers": {
+    "unhcr-refugees-mcp-server": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cyanheads/unhcr-refugees-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

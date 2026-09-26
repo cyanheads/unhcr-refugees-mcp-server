@@ -1,0 +1,45 @@
+{
+  "name": "unhcr-refugees-mcp-server",
+  "version": "0.1.0",
+  "description": "UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/unhcr-refugees-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/unhcr-refugees-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "unhcr",
+    "refugees",
+    "asylum",
+    "displacement",
+    "idp",
+    "statelessness",
+    "humanitarian",
+    "migration",
+    "statistics",
+    "open-data"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "unhcr-refugees-mcp-server",
+    "shortDescription": "UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present.",
+    "longDescription": "Year-end refugee, asylum-seeker, IDP, and stateless population stocks by country of origin and country of asylum, plus annual asylum applications, asylum decisions, and durable solutions (returns, resettlement, naturalisation), from UNHCR's Refugee Population Statistics Database via its keyless public API. Coverage runs from 1951 to the latest annual release.",
+    "developerName": "cyanheads",
+    "category": "research",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/cyanheads/unhcr-refugees-mcp-server",
+    "defaultPrompt": []
+  }
+}
