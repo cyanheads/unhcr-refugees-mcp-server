@@ -19,7 +19,12 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "UNHCR_REQUESTS_PER_SECOND": "${user_config.UNHCR_REQUESTS_PER_SECOND}",
+        "UNHCR_MAX_ROWS": "${user_config.UNHCR_MAX_ROWS}",
+        "UNHCR_CACHE_MAX_MB": "${user_config.UNHCR_CACHE_MAX_MB}",
+        "UNHCR_DATASET_TTL_SECONDS": "${user_config.UNHCR_DATASET_TTL_SECONDS}",
+        "UNHCR_DATAFRAME_DROP_ENABLED": "${user_config.UNHCR_DATAFRAME_DROP_ENABLED}"
       }
     }
   },
@@ -28,5 +33,47 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "UNHCR_REQUESTS_PER_SECOND": {
+      "title": "Requests per second",
+      "description": "Upstream request starts per second (1–10).",
+      "type": "number",
+      "required": false,
+      "default": 4,
+      "min": 1,
+      "max": 10
+    },
+    "UNHCR_MAX_ROWS": {
+      "title": "Row cap per call",
+      "description": "Most upstream rows one tool call fetches; a larger result stops at the cap and reports complete: false.",
+      "type": "number",
+      "required": false,
+      "default": 150000,
+      "min": 10000,
+      "max": 500000
+    },
+    "UNHCR_CACHE_MAX_MB": {
+      "title": "Response cache (MB)",
+      "description": "Response-cache budget in MB; 0 disables the cache.",
+      "type": "number",
+      "required": false,
+      "default": 64,
+      "min": 0
+    },
+    "UNHCR_DATASET_TTL_SECONDS": {
+      "title": "Dataframe TTL (seconds)",
+      "description": "How long a staged dataframe lives, in seconds (minimum 60).",
+      "type": "number",
+      "required": false,
+      "default": 86400,
+      "min": 60
+    },
+    "UNHCR_DATAFRAME_DROP_ENABLED": {
+      "title": "Enable dataframe drop",
+      "description": "Register unhcr_dataframe_drop. Off by default; the TTL reclaims staged tables.",
+      "type": "boolean",
+      "required": false,
+      "default": false
+    }
+  }
 }

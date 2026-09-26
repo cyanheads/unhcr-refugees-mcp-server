@@ -2,7 +2,9 @@
  * @fileoverview Vitest config for the consumer server. Uses Vitest `projects`
  * so you can split suites (unit/smoke/integration/fuzz) and run each with
  * `--project <name>` as the surface grows. Extends the framework's base config
- * for shared `resolve`, `ssr`, and coverage settings.
+ * for shared `resolve`, `ssr`, and coverage settings. A bare `vitest run` runs
+ * every project listed here, so the live suite (`tests/live/`) has its own
+ * config, `vitest.live.config.ts`, and the unit project excludes it.
  *
  * @module vitest.config
  */
@@ -23,7 +25,7 @@ export default mergeConfig(
           test: {
             name: 'unit',
             include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
-            exclude: ['tests/smoke/**', 'tests/integration/**', 'tests/fuzz/**'],
+            exclude: ['tests/smoke/**', 'tests/integration/**', 'tests/fuzz/**', 'tests/live/**'],
           },
         },
         {

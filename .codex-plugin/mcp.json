@@ -4,6 +4,13 @@
     "args": ["-y", "@cyanheads/unhcr-refugees-mcp-server"],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
-    }
+    },
+    "env_vars": [
+      "UNHCR_REQUESTS_PER_SECOND",
+      "UNHCR_MAX_ROWS",
+      "UNHCR_CACHE_MAX_MB",
+      "UNHCR_DATASET_TTL_SECONDS",
+      "UNHCR_DATAFRAME_DROP_ENABLED"
+    ]
   }
 }

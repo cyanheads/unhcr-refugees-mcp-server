@@ -51,10 +51,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="unhcr-refugees-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="UNHCR displacement statistics — refugee, asylum-seeker, IDP, and stateless populations, asylum applications and decisions, and durable solutions, 1951 to present."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/unhcr-refugees-mcp-server"
 
 # Copy dependency manifests. `bunfig.toml` rides along so every install below
 # passes its release-age gate and security scanner, as a local install does.
@@ -108,20 +108,11 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
       && bun add --omit=dev --omit=peer --ignore-scripts $specs; \
     fi
 
-# Copy the compiled application code from the build stage
+# Copy the compiled application code from the build stage. Only `dist/` crosses
+# stages: node_modules above was installed here, on the target platform, so it
+# links the target's DuckDB native binding. A node_modules copied from the
+# $BUILDPLATFORM build stage would carry the build machine's binding instead.
 COPY --from=build /usr/src/app/dist ./dist
-
-# Mirror CLI (MirrorService adopters only — Tier 3, opt-in):
-# Copy your mirror lifecycle scripts and emit a runtime tsconfig so Bun resolves
-# the @/ path alias against ./dist/ rather than ./src/.
-# See the api-mirror skill for the full recipe.
-#
-# COPY --from=build /usr/src/app/scripts/<your>-mirror-init.ts \
-#                   /usr/src/app/scripts/<your>-mirror-refresh.ts \
-#                   /usr/src/app/scripts/<your>-mirror-verify.ts \
-#                   /usr/src/app/scripts/_mirror-context.ts \
-#                   ./scripts/
-# RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
@@ -129,10 +120,12 @@ COPY --from=build /usr/src/app/dist ./dist
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
 RUN mkdir -p /var/log/unhcr-refugees-mcp-server && chown -R bun:bun /var/log/unhcr-refugees-mcp-server
 
-# Writable data dirs for on-disk SQLite stores (catalog index / observations
-# mirror), owned by the runtime user. Mount a volume over either in production.
-RUN mkdir -p /usr/src/app/.cache /usr/src/app/.mirror \
-  && chown -R bun:bun /usr/src/app/.cache /usr/src/app/.mirror
+# DataCanvas scratch and export roots, owned by the runtime user. DuckDB spills
+# queries past its memory limit into the scratch root.
+RUN mkdir -p /var/lib/unhcr-refugees-mcp-server/canvas-tmp /var/lib/unhcr-refugees-mcp-server/canvas-exports \
+  && chown -R bun:bun /var/lib/unhcr-refugees-mcp-server
+ENV CANVAS_TEMP_PATH="/var/lib/unhcr-refugees-mcp-server/canvas-tmp"
+ENV CANVAS_EXPORT_PATH="/var/lib/unhcr-refugees-mcp-server/canvas-exports"
 
 # Switch to the non-root user
 USER bun

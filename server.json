@@ -26,6 +26,41 @@
       ],
       "environmentVariables": [
         {
+          "name": "UNHCR_REQUESTS_PER_SECOND",
+          "description": "Upstream request starts per second for the whole process (1–10).",
+          "format": "number",
+          "isRequired": false,
+          "default": "4"
+        },
+        {
+          "name": "UNHCR_MAX_ROWS",
+          "description": "Most upstream rows one tool call fetches (10000–500000); a larger result stops at the cap with complete: false.",
+          "format": "number",
+          "isRequired": false,
+          "default": "150000"
+        },
+        {
+          "name": "UNHCR_CACHE_MAX_MB",
+          "description": "Response-cache budget in MB; 0 disables the cache.",
+          "format": "number",
+          "isRequired": false,
+          "default": "64"
+        },
+        {
+          "name": "UNHCR_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (minimum 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "UNHCR_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to register unhcr_dataframe_drop; off by default, the per-table TTL reclaims staged tables.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -54,6 +89,41 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "UNHCR_REQUESTS_PER_SECOND",
+          "description": "Upstream request starts per second for the whole process (1–10). Every caller of a hosted instance shares it.",
+          "format": "number",
+          "isRequired": false,
+          "default": "4"
+        },
+        {
+          "name": "UNHCR_MAX_ROWS",
+          "description": "Most upstream rows one tool call fetches (10000–500000); a larger result stops at the cap with complete: false.",
+          "format": "number",
+          "isRequired": false,
+          "default": "150000"
+        },
+        {
+          "name": "UNHCR_CACHE_MAX_MB",
+          "description": "Response-cache budget in MB; 0 disables the cache.",
+          "format": "number",
+          "isRequired": false,
+          "default": "64"
+        },
+        {
+          "name": "UNHCR_DATASET_TTL_SECONDS",
+          "description": "Per-table TTL for staged dataframes, in seconds (minimum 60).",
+          "format": "number",
+          "isRequired": false,
+          "default": "86400"
+        },
+        {
+          "name": "UNHCR_DATAFRAME_DROP_ENABLED",
+          "description": "Set to true to register unhcr_dataframe_drop; off by default, the per-table TTL reclaims staged tables.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",

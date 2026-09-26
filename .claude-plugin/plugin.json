@@ -38,8 +38,55 @@
         "@cyanheads/unhcr-refugees-mcp-server"
       ],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "UNHCR_REQUESTS_PER_SECOND": "${user_config.UNHCR_REQUESTS_PER_SECOND}",
+        "UNHCR_MAX_ROWS": "${user_config.UNHCR_MAX_ROWS}",
+        "UNHCR_CACHE_MAX_MB": "${user_config.UNHCR_CACHE_MAX_MB}",
+        "UNHCR_DATASET_TTL_SECONDS": "${user_config.UNHCR_DATASET_TTL_SECONDS}",
+        "UNHCR_DATAFRAME_DROP_ENABLED": "${user_config.UNHCR_DATAFRAME_DROP_ENABLED}"
       }
+    }
+  },
+  "userConfig": {
+    "UNHCR_REQUESTS_PER_SECOND": {
+      "type": "number",
+      "title": "Requests per second",
+      "description": "Upstream request starts per second (1–10).",
+      "sensitive": false,
+      "required": false,
+      "default": 4
+    },
+    "UNHCR_MAX_ROWS": {
+      "type": "number",
+      "title": "Row cap per call",
+      "description": "Most upstream rows one tool call fetches (10000–500000); a larger result stops at the cap and reports complete: false.",
+      "sensitive": false,
+      "required": false,
+      "default": 150000
+    },
+    "UNHCR_CACHE_MAX_MB": {
+      "type": "number",
+      "title": "Response cache (MB)",
+      "description": "Response-cache budget in MB; 0 disables the cache.",
+      "sensitive": false,
+      "required": false,
+      "default": 64
+    },
+    "UNHCR_DATASET_TTL_SECONDS": {
+      "type": "number",
+      "title": "Dataframe TTL (seconds)",
+      "description": "How long a staged dataframe lives, in seconds (minimum 60).",
+      "sensitive": false,
+      "required": false,
+      "default": 86400
+    },
+    "UNHCR_DATAFRAME_DROP_ENABLED": {
+      "type": "boolean",
+      "title": "Enable dataframe drop",
+      "description": "Register unhcr_dataframe_drop. Off by default; the TTL reclaims staged tables.",
+      "sensitive": false,
+      "required": false,
+      "default": false
     }
   }
 }
