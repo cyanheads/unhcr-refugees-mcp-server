@@ -108,17 +108,12 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge?.available) {
-      throw ctx.fail(
-        'canvas_unavailable',
-        'Dataframes are unavailable in this deployment.',
-        ctx.recoveryFor('canvas_unavailable'),
-      );
+      throw ctx.fail('canvas_unavailable', 'Dataframes are unavailable in this deployment.');
     }
     if (input.name === undefined && !bridge.listingEnabled) {
       throw ctx.fail(
         'listing_unavailable',
         'Listing every staged dataframe is turned off in this deployment; describe one by name.',
-        ctx.recoveryFor('listing_unavailable'),
       );
     }
 

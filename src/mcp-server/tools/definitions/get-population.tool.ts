@@ -343,7 +343,6 @@ export const getPopulationTool = tool('unhcr_get_population', {
         ? `${failure.hint} For current-year estimates by asylum country, set include_nowcast and omit origin.`
         : failure.hint;
       throw ctx.fail(failure.reason, failure.message, {
-        ...ctx.recoveryFor(failure.reason),
         ...failure.data,
         ...(hint && { recovery: { hint } }),
       });

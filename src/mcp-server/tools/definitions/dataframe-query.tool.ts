@@ -214,11 +214,7 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge?.available) {
-      throw ctx.fail(
-        'canvas_unavailable',
-        'Dataframes are unavailable in this deployment.',
-        ctx.recoveryFor('canvas_unavailable'),
-      );
+      throw ctx.fail('canvas_unavailable', 'Dataframes are unavailable in this deployment.');
     }
 
     // The canvas refuses a preview above rowLimit; past row_limit no more rows exist to show.

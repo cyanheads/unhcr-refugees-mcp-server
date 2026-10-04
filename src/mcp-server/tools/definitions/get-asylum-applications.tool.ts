@@ -164,7 +164,6 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
     if (!resolved.ok) {
       const { failure } = resolved;
       throw ctx.fail(failure.reason, failure.message, {
-        ...ctx.recoveryFor(failure.reason),
         ...failure.data,
         ...(failure.hint && { recovery: { hint: failure.hint } }),
       });

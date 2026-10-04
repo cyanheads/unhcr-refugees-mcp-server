@@ -52,11 +52,7 @@ export const dataframeDropTool = tool('unhcr_dataframe_drop', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge?.available) {
-      throw ctx.fail(
-        'canvas_unavailable',
-        'Dataframes are unavailable in this deployment.',
-        ctx.recoveryFor('canvas_unavailable'),
-      );
+      throw ctx.fail('canvas_unavailable', 'Dataframes are unavailable in this deployment.');
     }
     const dropped = await bridge.drop(ctx, input.name);
     ctx.log.info('Dataframe drop requested', { name: input.name, dropped });

@@ -1,6 +1,6 @@
 # unhcr-refugees-mcp-server — Design
 
-**Package:** `@cyanheads/unhcr-refugees-mcp-server` · **Framework:** `@cyanheads/mcp-ts-core` ^0.13.8 · **Upstream:** UNHCR Refugee Statistics API (`https://api.unhcr.org/population/v1`), keyless
+**Package:** `@cyanheads/unhcr-refugees-mcp-server` · **Framework:** `@cyanheads/mcp-ts-core` ^0.13.11 · **Upstream:** UNHCR Refugee Statistics API (`https://api.unhcr.org/population/v1`), keyless
 
 Every upstream behavior this design relies on was probed live on 2026-09-26. The verified facts are in [API Reference](#api-reference).
 
