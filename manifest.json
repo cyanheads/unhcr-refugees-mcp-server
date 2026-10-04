@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "unhcr-refugees-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/unhcr-refugees-mcp-server#readme",
