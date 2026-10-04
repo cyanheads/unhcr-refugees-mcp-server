@@ -7,23 +7,19 @@
     "source": "github"
   },
   "version": "0.1.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://unhcr-refugees.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/unhcr-refugees-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "UNHCR_REQUESTS_PER_SECOND",
@@ -76,19 +72,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/unhcr-refugees-mcp-server",
-      "runtimeHint": "node",
+      "runtimeHint": "npx",
       "version": "0.1.1",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "UNHCR_REQUESTS_PER_SECOND",
           "description": "Upstream request starts per second for the whole process (1–10). Every caller of a hosted instance shares it.",

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -19,11 +19,17 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://unhcr-refugees.caseyjhand.com/mcp](https://unhcr-refugees.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-Displacement statistics from the keyless [UNHCR Refugee Data Finder API](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations by country of origin and asylum from 1951, asylum applications and decisions from 2000, and returns, resettlement, and naturalisation from 1959. Resolve country names to ISO3 codes, pull annual figures with notes on how to read them, and run SQL over results too large to return inline. Runs as a stdio process or a local Streamable HTTP server.
+Displacement statistics from the keyless [UNHCR Refugee Data Finder API](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations by country of origin and asylum from 1951, asylum applications and decisions from 2000, and returns, resettlement, and naturalisation from 1959. Resolve country names to ISO3 codes, pull annual figures with notes on how to read them, and run SQL over results too large to return inline. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
@@ -147,6 +153,25 @@ Agent-friendly output:
 - Nothing trimmed silently: year clamps, empty-result hints, truncation, and where the full set was staged all arrive as a notice in the response
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://unhcr-refugees.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "unhcr-refugees-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://unhcr-refugees.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Every caller of the hosted instance shares one UNHCR request queue and one dataframe workspace, so `unhcr_dataframe_describe` takes a table's exact name there; listing is off.
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
