@@ -11,4 +11,7 @@
 /wrangler.toml
 /biome.json
 /tsconfig*.json
-/vitest.config.ts
+/vitest*.config.ts
+/tests/
+/node_modules/**/test/
+/node_modules/**/tests/
