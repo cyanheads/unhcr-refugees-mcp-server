@@ -72,6 +72,14 @@ describe('input helpers', () => {
     expect(paging.safeParse({ limit: 0 }).success).toBe(false);
   });
 
+  it('keeps requested display preferences while enforcing the hard input bounds', () => {
+    const paging = z.object(resultInputs);
+    for (const limit of [1, 500, 501, 1_000_000]) expect(paging.parse({ limit }).limit).toBe(limit);
+    for (const limit of [0, -1, 1.5, 1_000_001, 'many', null])
+      expect(paging.safeParse({ limit }).success).toBe(false);
+    expect(paging.parse({}).limit).toBe(100);
+  });
+
   it('lets a default apply to a blank scalar and still validates a real value', () => {
     const sortBy = blankAsUnset(z.enum(['year', 'total']).default('year'));
     expect(sortBy.parse('')).toBe('year');

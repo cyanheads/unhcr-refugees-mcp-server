@@ -48,6 +48,16 @@ const call = (input: Input, ctx = context()) =>
 const syrPairs2025: Input = { origin: 'SYR', expand: 'asylum', year_from: 2025, year_to: 2025 };
 
 describe('success, both surfaces', () => {
+  it.each([501, 1_000_000])(
+    'discloses a clamped display request of %s on both surfaces',
+    async (limit) => {
+      const result = await runToolContract(getSolutionsTool, { origin: 'SYR', limit });
+      const structured = structuredOf(result);
+      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
+      expect(textOf(result.content)).toContain(String(structured.notice));
+      expect(structured).not.toHaveProperty('truncated');
+    },
+  );
   it('returns an under-cap page of flows through the production enrichment parse', async () => {
     const result = await runToolContract(getSolutionsTool, { origin: 'SYR' });
     const structured = structuredOf(result);
@@ -247,7 +257,7 @@ describe('inputs and sorting', () => {
   it.each([
     ['a population-only sort field', { sort_by: 'refugees' as 'year' }],
     ['year_from below 1900', { year_from: 1800 }],
-    ['limit above 500', { limit: 1000 }],
+    ['limit above hard ceiling', { limit: 1_000_001 }],
   ])('rejects %s as invalid params', async (_label, input) => {
     expect(errorOf(await runToolContract(getSolutionsTool, input as Input)).code).toBe(
       JsonRpcErrorCode.InvalidParams,

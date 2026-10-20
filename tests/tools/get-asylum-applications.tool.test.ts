@@ -79,6 +79,16 @@ type Row = Awaited<ReturnType<typeof call>>['rows'][number];
 const summary = (row: Row) => [row.year, row.unit, row.stages, row.applied];
 
 describe('success, both surfaces', () => {
+  it.each([501, 1_000_000])(
+    'discloses a clamped display request of %s on both surfaces',
+    async (limit) => {
+      const result = await runToolContract(getAsylumApplicationsTool, { origin: 'SYR', limit });
+      const structured = structuredOf(result);
+      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
+      expect(textOf(result.content)).toContain(String(structured.notice));
+      expect(structured).not.toHaveProperty('truncated');
+    },
+  );
   it('returns an under-cap page through the production enrichment parse', async () => {
     const result = await runToolContract(getAsylumApplicationsTool, {
       origin: 'SYR',
@@ -372,7 +382,7 @@ describe('split_by and stages', () => {
     ['a fractional year', { year_from: 2020.5 }],
     ['a year below 1900', { year_to: 1899 }],
     ['limit 0', { limit: 0 }],
-    ['limit above 500', { limit: 501 }],
+    ['limit above hard ceiling', { limit: 1_000_001 }],
   ])('rejects %s as invalid params before any upstream request', async (_label, input) => {
     const result = await runToolContract(getAsylumApplicationsTool, input as Input);
     expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);

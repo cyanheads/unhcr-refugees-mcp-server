@@ -14,7 +14,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
-import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { TERMS_URL } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { carryDataframeState, flowContext, stagePopulation } from '../helpers/dataframes.js';
@@ -58,9 +58,38 @@ const recoveryFor = (reason: string) =>
   dataframeQueryTool.errors?.find((entry) => entry.reason === reason)?.recovery;
 
 describe('pages through the production enrichment parse', () => {
+  it('characterizes literal query nesting without changing result values', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT * FROM query('SELECT 7 AS n')",
+    });
+    expect(structuredOf(result).rows).toEqual([{ n: 7 }]);
+    expect(textOf(result.content)).toContain('| 7 |');
+  });
+
+  it('bounds a single large cell without losing its retrieval path', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT repeat('x',600000) AS long_cell",
+      preview: 1,
+    });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(65_536);
+    expect(structuredOf(result)).toHaveProperty('result_chunks');
+  });
+
+  it('accepts and discloses preview preferences above the display ceiling', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT 1 AS n',
+      preview: 10_001,
+    });
+    expect(structuredOf(result).rows).toEqual([{ n: 1 }]);
+    expect(structuredOf(result).notice).toContain(
+      'Requested preview 10001; effective preview 1000.',
+    );
+  });
   it('returns an empty result with its notice and the attribution line', async () => {
     const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS n WHERE false' });
     expect(structuredOf(result)).toEqual({
+      complete: true,
+      incomplete_sources: [],
       columns: ['n'],
       row_count: 0,
       row_count_capped: false,
@@ -168,6 +197,35 @@ describe('pages through the production enrichment parse', () => {
 });
 
 describe('staged dataframes', () => {
+  it.each(['query', 'QuErY', '"query"', 'query /* comment */', 'query -- comment\n'])(
+    'retains incomplete root sources through %s and saved descendants',
+    async (queryFunction) => {
+      disposeUnhcrService();
+      initFakeUpstream({ pageSize: { population: 2 }, config: { maxRows: 10_000 } });
+      const flow = flowContext();
+      const name = await stagePopulation(flow, {
+        origin: 'SYR',
+        expand: 'asylum',
+        year_from: 2025,
+      });
+      const first = await queryIn(flow, {
+        sql: `SELECT count(*) AS n FROM ${queryFunction}('SELECT * FROM "${name.toLowerCase()}"')`,
+        register_as: 'df_CHILD_00001',
+      });
+      expect(first).toMatchObject({ complete: false, incomplete_sources: [name] });
+      const child = await runToolContract(querySeededFrom(flow), {
+        sql: 'SELECT * FROM df_CHILD_00001 WHERE false',
+        preview: 0,
+      });
+      expect(structuredOf(child)).toMatchObject({
+        complete: false,
+        incomplete_sources: [name],
+        rows: [],
+      });
+      expect(structuredOf(child).notice).toContain(name);
+      expect(textOf(child.content)).toContain(name);
+    },
+  );
   it('queries a staged result and credits the companion series it carries', async () => {
     const flow = flowContext();
     const name = await stagePopulation(flow, { asylum: 'JOR' });
@@ -333,6 +391,16 @@ describe('staged dataframes', () => {
 });
 
 describe('declared errors, by reason', () => {
+  it('advertises and enforces the finite preview preference bound, preserving zero, blanks and defaults', () => {
+    for (const preview of [0, 10_000, 10_001, 1_000_000])
+      expect(dataframeQueryTool.input.parse({ sql: 'SELECT 1', preview }).preview).toBe(preview);
+    for (const preview of [-1, 0.5, 1_000_001, 'many', null])
+      expect(dataframeQueryTool.input.safeParse({ sql: 'SELECT 1', preview }).success).toBe(false);
+    expect(
+      dataframeQueryTool.input.parse({ sql: 'SELECT 1', preview: ' ' }).preview,
+    ).toBeUndefined();
+    expect(dataframeQueryTool.input.parse({ sql: 'SELECT 1' }).preview).toBeUndefined();
+  });
   it.each([
     ['missing_table', 'SELECT * FROM df_NOPE0_NOPE0', JsonRpcErrorCode.NotFound],
     ['invalid_sql', 'SELECT no_such_column', JsonRpcErrorCode.ValidationError],
@@ -433,7 +501,7 @@ describe('declared errors, by reason', () => {
       shown: 2,
       cap: 2,
       notice:
-        'Showing 2 rows. More than row_limit (2) matched, so row_count is the cap, not the full size. Use register_as to keep the whole result, or raise row_limit (max 10000).',
+        'Requested preview 5; effective preview 2. Showing 2 rows. More than row_limit (2) matched, so row_count is the cap, not the full size. Use register_as to keep the whole result, or raise row_limit (max 10000).',
     });
   });
 
@@ -463,15 +531,235 @@ describe('declared errors, by reason', () => {
 });
 
 describe('format', () => {
-  it('escapes pipes and flattens line breaks in every cell and header, rendering nested values as JSON', async () => {
+  it('preserves pipes, line breaks, nulls and nested values as fenced JSON', async () => {
     const result = await runToolContract(dataframeQueryTool, {
       sql: `SELECT 'a|b' || chr(10) || 'c' AS "col|x", NULL AS empty, {'k': 1} AS nested`,
     });
     const text = textOf(result.content);
-    expect(text).toContain('| col\\|x | empty | nested |');
-    expect(text).toContain('| a\\|b c |  | {"k":1} |');
+    const encoded = text.split('```json\n')[1]?.split('\n```')[0];
+    expect(JSON.parse(encoded ?? '')).toEqual({
+      columns: ['col|x', 'empty', 'nested'],
+      rows: structuredOf(result).rows,
+    });
     expect(structuredOf(result).rows).toEqual([
       { 'col|x': 'a|b\nc', empty: null, nested: { k: 1 } },
     ]);
+  });
+});
+
+describe('lossless bounded snapshots', () => {
+  it.each([false, true])(
+    'composes source, clamp, byte and saved-table disclosures (register_as %s)',
+    async (saved) => {
+      disposeUnhcrService();
+      initFakeUpstream({ pageSize: { population: 2 }, config: { maxRows: 10_000 } });
+      const flow = flowContext();
+      const name = await stagePopulation(flow, {
+        origin: 'SYR',
+        expand: 'asylum',
+        year_from: 2025,
+      });
+      const result = await runToolContract(querySeededFrom(flow), {
+        sql: `SELECT repeat('x',60000) AS value FROM ${name}`,
+        row_limit: 1,
+        preview: 10_001,
+        ...(saved && { register_as: 'df_COMBO_00001' }),
+      });
+      const structured = structuredOf(result);
+      expect(structured).toMatchObject({
+        complete: false,
+        incomplete_sources: [name],
+        row_count_capped: !saved,
+        rows: [],
+        truncated: true,
+      });
+      for (const fragment of [
+        name,
+        'Requested preview 10001; effective preview 1.',
+        '65536 UTF-8 bytes',
+        'Base64-decode each chunk separately',
+      ]) {
+        expect(structured.notice).toContain(fragment);
+        expect(textOf(result.content)).toContain(fragment);
+      }
+      if (saved) {
+        expect(structured.notice).toContain('the full result is saved as df_COMBO_00001');
+        expect(textOf(result.content)).not.toContain('Use register_as');
+      }
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(65_536);
+    },
+  );
+  const contractIn = (flow: ReturnType<typeof flowContext>, input: Input) => {
+    const seeded: typeof dataframeQueryTool = {
+      ...dataframeQueryTool,
+      handler: async (parsed, ctx) => {
+        await carryDataframeState(flow, ctx);
+        const output = await dataframeQueryTool.handler(parsed, ctx);
+        await carryDataframeState(ctx, flow);
+        return output;
+      },
+    };
+    return runToolContract(seeded, input);
+  };
+
+  const bounded = (result: Awaited<ReturnType<typeof runToolContract>>) => {
+    expect(result.isError).not.toBe(true);
+    // The SDK's object-root output schema keeps these surfaces on both eras;
+    // modern adds resultType, while legacy leaves the complete object as-is.
+    for (const shape of [result, { ...result, resultType: 'complete' }]) {
+      expect(Buffer.byteLength(JSON.stringify(shape))).toBeLessThanOrEqual(65_536);
+      expect(
+        Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 123456789, result: shape })),
+      ).toBeLessThanOrEqual(65_536);
+    }
+  };
+
+  const recover = async (flow: ReturnType<typeof flowContext>, metadata: unknown) => {
+    const chunks = metadata as { name: string; chunk_count: number };
+    const pieces: Buffer[] = [];
+    for (let index = 0; index < chunks.chunk_count; index++) {
+      const page = await contractIn(flow, {
+        sql: `SELECT chunk_index,chunk FROM ${chunks.name} WHERE chunk_index=${index}`,
+      });
+      bounded(page);
+      const rows = structuredOf(page).rows as { chunk_index: number; chunk: string }[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.chunk_index).toBe(index);
+      const encoded = textOf(page.content).split('```json\n')[1]?.split('\n```')[0];
+      expect(JSON.parse(encoded ?? '').rows).toEqual(rows);
+      const bytes = Buffer.from(rows[0]?.chunk ?? '', 'base64');
+      expect(bytes.length).toBeLessThanOrEqual(6144);
+      pieces.push(bytes);
+    }
+    return JSON.parse(Buffer.concat(pieces).toString('utf8')) as Record<string, unknown>;
+  };
+
+  it.each([
+    ["SELECT repeat('x',600000) AS long_cell", 'long_cell', 'x'.repeat(600000)],
+    [
+      "SELECT repeat('😀|' || chr(10) || chr(9) || chr(92) || chr(34),10000) AS value",
+      'value',
+      '😀|\n\t\\"'.repeat(10000),
+    ],
+    [
+      "SELECT {'level':{'nested':[repeat('😀',10000),NULL,'']}} AS nested",
+      'nested',
+      { level: { nested: ['😀'.repeat(10000), null, ''] } },
+    ],
+  ])('reassembles exact values and column labels from %s', async (sql, column, value) => {
+    const flow = flowContext();
+    const result = await contractIn(flow, { sql: String(sql), preview: 1 });
+    bounded(result);
+    const structured = structuredOf(result);
+    expect(structured).toMatchObject({
+      rows: [],
+      row_count: 1,
+      row_count_capped: false,
+      complete: true,
+      truncated: true,
+    });
+    expect(structured.notice).toContain('65536 UTF-8 bytes');
+    expect(textOf(result.content)).toContain(String(structured.notice));
+    const recovered = await recover(flow, structured.result_chunks);
+    expect(recovered).toMatchObject({
+      columns: [column],
+      rows: [{ [String(column)]: value }],
+      row_count: 1,
+      complete: true,
+    });
+  });
+
+  it('withholds oversized column metadata at preview zero and retains all materialized rows', async () => {
+    const flow = flowContext();
+    const label = 'h'.repeat(8000);
+    const sql = `WITH t AS (SELECT 1 AS "${label}") SELECT a.*,b.*,c.*,d.*,e.* FROM t a,t b,t c,t d,t e`;
+    const result = await contractIn(flow, { sql, preview: 0 });
+    bounded(result);
+    expect(structuredOf(result)).toMatchObject({ rows: [], columns: [], metadata_withheld: true });
+    const recovered = await recover(flow, structuredOf(result).result_chunks);
+    expect((recovered.columns as string[])[0]).toBe(label);
+    expect(recovered.rows).toHaveLength(1);
+    expect(Object.keys((recovered.rows as object[])[0] ?? {})).toHaveLength(5);
+    expect(Object.values((recovered.rows as object[])[0] ?? {})).toEqual([1, 1, 1, 1, 1]);
+  });
+
+  it('keeps saved-table guidance and protects the saved table while staging chunks', async () => {
+    initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 20 });
+    const flow = flowContext();
+    const result = await contractIn(flow, {
+      sql: "SELECT repeat('x',60000) AS value",
+      register_as: 'df_SAVED_00011',
+      preview: 1_000_000,
+    });
+    bounded(result);
+    const structured = structuredOf(result);
+    expect(structured.notice).toContain('Requested preview 1000000; effective preview 1000.');
+    expect(structured.notice).toContain('the full result is saved as df_SAVED_00011');
+    expect(textOf(result.content)).not.toContain('Use register_as');
+    expect(await getCanvasBridge()!.describe(flow, 'df_SAVED_00011')).toHaveLength(1);
+    const recovered = await recover(flow, structured.result_chunks);
+    expect(recovered.rows).toEqual([{ value: 'x'.repeat(60000) }]);
+  });
+
+  it('re-slices chunk pages within budget while pointing to the same snapshot', async () => {
+    const flow = flowContext();
+    const first = await contractIn(flow, { sql: "SELECT repeat('x',600000) AS value" });
+    const chunks = structuredOf(first).result_chunks as { name: string; chunk_count: number };
+    const before = (await getCanvasBridge()!.describe(flow)).map((meta) => meta.tableName);
+    for (const offset of [0, 4]) {
+      const page = await contractIn(flow, {
+        sql: `SELECT chunk_index,chunk FROM ${chunks.name} ORDER BY chunk_index LIMIT 10 OFFSET ${offset}`,
+        preview: 10,
+      });
+      bounded(page);
+      expect(structuredOf(page).result_chunks).toMatchObject({ name: chunks.name });
+      const rows = structuredOf(page).rows as { chunk_index: number }[];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows[0]?.chunk_index).toBe(offset);
+      expect(rows.length).toBeLessThan(10);
+    }
+    expect((await getCanvasBridge()!.describe(flow)).map((meta) => meta.tableName)).toEqual(before);
+    const pastEnd = await contractIn(flow, {
+      sql: `SELECT chunk_index,chunk FROM ${chunks.name} WHERE chunk_index=${chunks.chunk_count}`,
+    });
+    bounded(pastEnd);
+    expect(structuredOf(pastEnd).rows).toEqual([]);
+  });
+
+  it('fails explicitly when the chunks and saved table cannot both fit', async () => {
+    initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 2 });
+    const flow = flowContext();
+    const result = await contractIn(flow, {
+      sql: "SELECT repeat('x',60000) AS value",
+      register_as: 'df_SAVED_00012',
+    });
+    expect(errorOf(result).data).toMatchObject({
+      reason: 'result_storage_unavailable',
+      retryable: false,
+      recovery: { hint: recoveryFor('result_storage_unavailable') },
+    });
+    expect(textOf(result.content)).toContain(String(recoveryFor('result_storage_unavailable')));
+  });
+
+  it('expires chunk metadata and returns the normal missing_table recovery', async () => {
+    const flow = flowContext();
+    const result = await contractIn(flow, { sql: "SELECT repeat('x',60000) AS value" });
+    const chunks = structuredOf(result).result_chunks as { name: string };
+    const [meta] = await getCanvasBridge()!.describe(flow, chunks.name);
+    await flow.state.set(`df-meta/${chunks.name}`, {
+      ...meta,
+      expiresAt: '2000-01-01T00:00:00.000Z',
+    });
+    await expect(queryIn(flow, { sql: `SELECT * FROM ${chunks.name}` })).rejects.toMatchObject({
+      data: { reason: 'missing_table' },
+    });
+    const expired = await contractIn(flow, {
+      sql: `SELECT chunk_index,chunk FROM ${chunks.name} WHERE chunk_index=0`,
+    });
+    expect(errorOf(expired).data).toMatchObject({
+      reason: 'missing_table',
+      recovery: { hint: recoveryFor('missing_table') },
+    });
+    expect(await flow.state.get(`df-meta/${chunks.name}`)).toBeNull();
   });
 });

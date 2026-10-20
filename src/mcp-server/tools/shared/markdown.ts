@@ -34,7 +34,10 @@ export function blockquote(text: string): string {
 
 /** Fence a block with more backticks than any run it contains. */
 export function fence(text: string, info = ''): string {
-  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const longestRun = (text.match(/`+/g) ?? []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0,
+  );
   const ticks = '`'.repeat(Math.max(3, longestRun + 1));
   return `${ticks}${info}\n${text}\n${ticks}`;
 }

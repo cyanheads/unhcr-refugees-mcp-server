@@ -18,30 +18,24 @@ import {
   getCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { blankAsUnset } from '../shared/inputs.js';
-import { cell, inline, table } from '../shared/markdown.js';
+import { attributionSchema, STAGING_BUDGET } from '../shared/outputs.js';
 import {
-  attributionSchema,
-  renderAttribution,
-  renderEvicted,
-  STAGING_BUDGET,
-} from '../shared/outputs.js';
+  formatQueryOutput,
+  QUERY_RESULT_MAX_BYTES,
+  type QueryDisclosure,
+  type QueryOutput,
+  queryResultBytes,
+} from '../shared/query-output.js';
 import { buildAttribution } from '../shared/results.js';
 
 /** Longest `sql` accepted: DuckDB's parse cost grows with statement length, and the cap bounds it. */
 const SQL_MAX_LENGTH = 20_000;
 const SQL_CAP = `${SQL_MAX_LENGTH.toLocaleString('en-US')} characters`;
 
-const renderValue = (value: unknown): string => {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return cell(value);
-  if (typeof value === 'object') return cell(JSON.stringify(value));
-  return String(value);
-};
-
 export const dataframeQueryTool = tool('unhcr_dataframe_query', {
   title: 'Query staged dataframes',
   description:
-    'Run a single-statement SELECT against the dataframes staged by the unhcr_get_* tools. Check a dataframe’s columns with unhcr_dataframe_describe first. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, external-file functions, and system catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are rejected. Optional register_as saves the result as a new dataframe with a fresh TTL. Recompute rates from summed counts rather than averaging rate columns.',
+    'Run a single-statement SELECT against the dataframes staged by the unhcr_get_* tools. Check a dataframe’s columns with unhcr_dataframe_describe first. Writes, DDL, DROP, COPY, PRAGMA, ATTACH, file references, external-data functions, engine introspection, dynamic table lookup, and system catalogs are rejected; query() accepts only a single SQL string literal, checked by the same gate. Optional register_as saves the result as a new dataframe with a fresh TTL. Recompute rates from summed counts rather than averaging rate columns.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -60,8 +54,8 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
     ).describe(
       `Save the result as a new dataframe under this name (df_ plus two groups of 5 uppercase letters or digits, e.g. df_ABCDE_12345) with a fresh TTL, to chain analyses. The name must not already be staged. The saved rows count toward the ${STAGING_BUDGET} staging budget: the oldest other dataframes are evicted to make room, and a result larger than the budget is not saved.`,
     ),
-    preview: blankAsUnset(z.number().int().min(0).max(10_000).optional()).describe(
-      'Rows to return inline when that should be fewer than the query materializes, e.g. a small sample while register_as keeps the whole result; a value above row_limit is treated as row_limit. Omit to return every row up to row_limit.',
+    preview: blankAsUnset(z.number().int().min(0).max(1_000_000).optional()).describe(
+      'Requested inline rows, 0–1000000. Values above row_limit are clamped to row_limit with disclosure. Omit to return every row up to row_limit; the serialized byte ceiling may withhold whole rows or metadata, preserving the result as lossless chunks.',
     ),
     row_limit: blankAsUnset(z.number().int().min(1).max(10_000).default(1000)).describe(
       'Most rows the query materializes (1–10000, default 1000). When more match, row_count_capped is true; use register_as to keep the full result.',
@@ -69,6 +63,42 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
   }),
 
   output: z.object({
+    complete: z
+      .boolean()
+      .describe(
+        'False when any original source fetch was incomplete, independently of display truncation.',
+      ),
+    incomplete_sources: z
+      .array(z.string())
+      .describe(
+        'Original incomplete upstream dataframe handles; retained through saved descendants. If metadata_withheld is true, consult the result snapshot for the full list.',
+      ),
+    metadata_withheld: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when oversized column names or incomplete-source metadata are withheld inline and retained in result_chunks.',
+      ),
+    result_chunks: z
+      .object({
+        name: z
+          .string()
+          .describe('Tenant-scoped dataframe holding chunk_index and base64 chunk columns.'),
+        encoding: z
+          .literal('base64-json-utf8')
+          .describe(
+            'Decode each base64 chunk, concatenate bytes in index order, then decode UTF-8 and JSON.',
+          ),
+        chunk_count: z
+          .number()
+          .int()
+          .describe('Chunks numbered from zero, with at most 6144 source bytes each.'),
+        expires_at: z.string().describe('ISO 8601 expiry of the chunk dataframe.'),
+      })
+      .optional()
+      .describe(
+        'Lossless materialized result snapshot when the byte ceiling withholds rows or metadata.',
+      ),
     columns: z.array(z.string()).describe('Column names in projection order.'),
     row_count: z
       .number()
@@ -112,6 +142,16 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
   },
 
   errors: [
+    {
+      reason: 'result_storage_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      retryable: false,
+      severity: 'warning',
+      thrownBy: 'service',
+      when: 'The lossless result snapshot cannot be retained within the staging budget or storage fails',
+      recovery:
+        'Select fewer columns or smaller values, or filter or aggregate the query, so its result fits inline or in the staging budget.',
+    },
     {
       reason: 'canvas_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -187,9 +227,9 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       severity: 'notice',
       thrownBy: 'service',
-      when: 'The SQL calls a file-reading or external-data table function such as read_csv, read_parquet, or glob',
+      when: 'The SQL calls a denied external-data or introspection function, uses query_table, or passes query() anything other than a single SQL string literal',
       recovery:
-        'Remove the file-reading function and query only the df_<id> tables your unhcr_get_* results or register_as calls created.',
+        'Remove the denied function and reference your staged df_<id> tables directly; query() accepts only a single SQL string literal.',
     },
     {
       reason: 'plan_operator_not_allowed',
@@ -220,74 +260,146 @@ export const dataframeQueryTool = tool('unhcr_dataframe_query', {
     // The canvas refuses a preview above rowLimit; past row_limit no more rows exist to show.
     const preview =
       input.preview === undefined ? undefined : Math.min(input.preview, input.row_limit);
-    const { result, meta, providers, evicted } = await bridge.query(ctx, input.sql, {
-      rowLimit: input.row_limit,
-      ...(preview !== undefined && { preview }),
-      ...(input.register_as !== undefined && { registerAs: input.register_as }),
-    });
+    const { result, meta, providers, evicted, complete, incompleteSources, chunkSource } =
+      await bridge.query(ctx, input.sql, {
+        rowLimit: input.row_limit,
+        ...(input.register_as !== undefined && { registerAs: input.register_as }),
+      });
 
     const capped = result.truncated === true;
     const previewBinds = preview !== undefined && preview < input.row_limit;
     const cap = previewBinds ? preview : input.row_limit;
     const lever = previewBinds ? 'raise preview' : 'raise row_limit (max 10000)';
-    if (result.rowCount === 0) {
-      ctx.enrich.notice(
-        'Query returned 0 rows. Check the dataframe names and columns with unhcr_dataframe_describe, and whether the filters or joins in the query exclude every row.',
-      );
-    } else if (capped) {
-      ctx.enrich.truncated({
-        shown: result.rows.length,
-        cap,
-        guidance: `Showing ${result.rows.length} rows. More than row_limit (${input.row_limit}) matched, so row_count is the cap, not the full size. Use register_as to keep the whole result, or ${lever}.`,
-      });
-    } else if (result.rowCount > result.rows.length) {
-      // Re-running under the same register_as name would clash, so name the saved table instead.
-      ctx.enrich.truncated({
-        shown: result.rows.length,
-        cap,
-        guidance: meta
-          ? `Showing ${result.rows.length} of ${result.rowCount} rows; the full result is saved as ${meta.tableName}, so query it for the rest.`
-          : `Showing ${result.rows.length} of ${result.rowCount} rows. Use register_as to keep the whole result, or ${lever}.`,
-      });
-    }
-
-    return {
+    const snapshot: QueryOutput = {
       columns: result.columns,
       row_count: result.rowCount,
       row_count_capped: capped,
       rows: result.rows,
+      complete,
+      incomplete_sources: incompleteSources,
       ...(meta && { registered_as: meta.tableName, expires_at: meta.expiresAt }),
       ...(evicted && { evicted }),
       attribution: buildAttribution(providers),
     };
+    const output: QueryOutput = {
+      ...snapshot,
+      rows: result.rows.slice(0, preview ?? input.row_limit),
+    };
+    let byteWithheld = false;
+    const disclosure = (): QueryDisclosure => {
+      const fragments: string[] = [];
+      if (input.preview !== undefined && input.preview > (preview ?? input.row_limit)) {
+        fragments.push(`Requested preview ${input.preview}; effective preview ${preview}.`);
+      }
+      if (!complete)
+        fragments.push(
+          `This result is partial: upstream fetches for ${output.incomplete_sources.length ? output.incomplete_sources.join(', ') : 'the sources retained in the result snapshot'} stopped before completion. Narrow the original data calls to obtain complete sources.`,
+        );
+      if (result.rowCount === 0) {
+        fragments.push(
+          'Query returned 0 rows. Check the dataframe names and columns with unhcr_dataframe_describe, and whether the filters or joins in the query exclude every row.',
+        );
+      } else if (capped) {
+        fragments.push(
+          `Showing ${output.rows.length} rows. More than row_limit (${input.row_limit}) matched, so row_count is the cap, not the full size. Use register_as to keep the whole result, or ${lever}.`,
+        );
+      } else if (result.rowCount > output.rows.length) {
+        fragments.push(
+          meta
+            ? `Showing ${output.rows.length} of ${result.rowCount} rows; the full result is saved as ${meta.tableName}, so query it for the rest.`
+            : byteWithheld
+              ? `Showing ${output.rows.length} of ${result.rowCount} rows.`
+              : `Showing ${output.rows.length} of ${result.rowCount} rows. Use register_as to keep the whole result, or ${lever}.`,
+        );
+      }
+      if (byteWithheld)
+        fragments.push(
+          `The serialized result is limited to ${QUERY_RESULT_MAX_BYTES} UTF-8 bytes; whole rows or oversized metadata were withheld.`,
+        );
+      if (output.result_chunks)
+        fragments.push(
+          `Read SELECT chunk_index,chunk FROM ${output.result_chunks.name} WHERE chunk_index=0 with unhcr_dataframe_query, then increment chunk_index through ${output.result_chunks.chunk_count - 1}. Base64-decode each chunk separately, concatenate bytes in index order, then decode UTF-8 and parse JSON.`,
+        );
+      const notice = fragments.join(' ');
+      const truncated = capped || output.rows.length < result.rowCount || byteWithheld;
+      return {
+        ...(truncated && { truncated: true, shown: output.rows.length, cap }),
+        ...(notice && { notice }),
+      };
+    };
+
+    if (queryResultBytes(output, disclosure()) > QUERY_RESULT_MAX_BYTES) {
+      byteWithheld = true;
+      // A page of unmodified chunks already has its canonical snapshot. Never spill the spill.
+      const chunkPage =
+        chunkSource &&
+        new RegExp(
+          `^\\s*SELECT\\s+(?:chunk_index\\s*,\\s*chunk|\\*)\\s+FROM\\s+"?${chunkSource.tableName}"?(?=\\s|;|$)`,
+          'i',
+        ).test(input.sql) &&
+        !/\b(?:join|union|intersect|except|group|having)\b/i.test(input.sql) &&
+        result.columns.length === 2 &&
+        result.columns[0] === 'chunk_index' &&
+        result.columns[1] === 'chunk' &&
+        result.rows.every(
+          (row) =>
+            typeof row.chunk === 'string' &&
+            row.chunk.length <= 8192 &&
+            Number.isInteger(Number(row.chunk_index)),
+        );
+      const chunks = chunkPage
+        ? {
+            name: chunkSource.tableName,
+            row_count: chunkSource.rowCount,
+            expires_at: chunkSource.expiresAt,
+          }
+        : await bridge.stageResultChunks(
+            ctx,
+            snapshot,
+            { complete, incompleteSources, providers },
+            [...(meta ? [meta.tableName] : []), ...(chunkSource ? [chunkSource.tableName] : [])],
+          );
+      output.result_chunks = {
+        name: chunks.name,
+        encoding: 'base64-json-utf8',
+        chunk_count: chunks.row_count,
+        expires_at: chunks.expires_at,
+      };
+      if ('evicted' in chunks && chunks.evicted)
+        output.evicted = [...(output.evicted ?? []), ...chunks.evicted];
+      const originalRows = output.rows;
+      output.rows = [];
+      if (queryResultBytes(output, disclosure()) > QUERY_RESULT_MAX_BYTES) {
+        output.columns = [];
+        output.incomplete_sources = [];
+        output.metadata_withheld = true;
+      }
+      // Binary search keeps complete rows and avoids serializing every prefix of a large page.
+      let low = 0;
+      let high = output.metadata_withheld ? 0 : originalRows.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        output.rows = originalRows.slice(0, middle);
+        if (queryResultBytes(output, disclosure()) <= QUERY_RESULT_MAX_BYTES) low = middle;
+        else high = middle - 1;
+      }
+      output.rows = originalRows.slice(0, low);
+      if (queryResultBytes(output, disclosure()) > QUERY_RESULT_MAX_BYTES)
+        throw ctx.fail(
+          'result_storage_unavailable',
+          'Bounded SQL result metadata exceeded its byte budget.',
+        );
+    }
+    const enriched = disclosure();
+    if (enriched.truncated)
+      ctx.enrich.truncated({
+        shown: output.rows.length,
+        cap,
+        ...(enriched.notice && { guidance: enriched.notice }),
+      });
+    else if (enriched.notice) ctx.enrich.notice(enriched.notice);
+    return output;
   },
 
-  format: (result) => {
-    const lines: string[] = [];
-    if (result.registered_as) {
-      lines.push(
-        `Registered as ${result.registered_as} (expires ${result.expires_at ?? 'with its TTL'}).`,
-      );
-    }
-    if (result.evicted) lines.push(renderEvicted(result.evicted));
-    const shown = result.rows.length < result.row_count ? `, showing ${result.rows.length}` : '';
-    lines.push(
-      `**${result.row_count} rows**${result.row_count_capped ? ` — capped at row_limit${shown}; more rows matched` : shown}`,
-      '',
-    );
-    if (result.rows.length === 0) {
-      lines.push('_No rows._');
-      if (result.columns.length > 0)
-        lines.push(`Columns: ${result.columns.map(inline).join(', ')}`);
-    } else {
-      lines.push(
-        table(
-          result.columns.map(cell),
-          result.rows.map((row) => result.columns.map((column) => renderValue(row[column]))),
-        ),
-      );
-    }
-    lines.push('', renderAttribution(result.attribution));
-    return [{ type: 'text', text: lines.join('\n') }];
-  },
+  format: formatQueryOutput,
 });

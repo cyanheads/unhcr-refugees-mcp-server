@@ -83,6 +83,75 @@ const dataRequests = (endpoint: string) =>
 const syrPairs2025: Input = { origin: 'SYR', expand: 'asylum', year_from: 2025, year_to: 2025 };
 
 describe('success, both surfaces', () => {
+  it.each([true, false])(
+    'clamps after sorting and discloses actual overflow with dataframes %s',
+    async (enabled) => {
+      disposeUnhcrService();
+      initFakeUpstream({
+        tables: {
+          population: [
+            ...POPULATION_ROWS.filter((row) => row.coo_iso === '-' && row.coa_iso === '-'),
+            ...Array.from({ length: 501 }, (_, index) =>
+              populationRow(2025, 'SYR', 'DEU', [index, 0, 0, 0, 0, 0, 0, 0, 0]),
+            ),
+          ],
+        },
+      });
+      if (!enabled) initCanvasBridge(undefined);
+      const result = await runToolContract(getPopulationTool, {
+        origin: 'SYR',
+        asylum: 'DEU',
+        year_from: 2025,
+        year_to: 2025,
+        sort_by: 'refugees',
+        limit: 501,
+      });
+      const structured = structuredOf(result);
+      expect(structured).toMatchObject({ total_rows: 501, truncated: true, cap: 500, shown: 500 });
+      const rows = structured.rows as { refugees: number }[];
+      expect(rows[0]?.refugees).toBe(500);
+      expect(rows[499]?.refugees).toBe(1);
+      expect(structured.notice).toContain('Requested limit 501; effective limit 500.');
+      expect(structured.notice).toContain(
+        enabled ? '(501 rows)' : 'Showing 500 of 501 rows. Dataframes are unavailable',
+      );
+      expect(textOf(result.content)).toContain(String(structured.notice));
+    },
+  );
+
+  it('composes clamps with empty, incomplete and explicitly staged small-result notices', async () => {
+    for (const input of [
+      { origin: 'SYR', asylum: 'JPN' },
+      { origin: 'SYR', stage: true },
+    ]) {
+      const result = await runToolContract(getPopulationTool, { ...input, limit: 501 });
+      expect(structuredOf(result).notice).toContain('Requested limit 501; effective limit 500.');
+      expect(textOf(result.content)).toContain(String(structuredOf(result).notice));
+      expect(structuredOf(result)).not.toHaveProperty('truncated');
+    }
+    disposeUnhcrService();
+    initFakeUpstream({ pageSize: { population: 2 }, config: { maxRows: 10_000 } });
+    const partial = await runToolContract(getPopulationTool, {
+      origin: 'SYR',
+      expand: 'asylum',
+      year_from: 2025,
+      limit: 501,
+    });
+    expect(structuredOf(partial)).toMatchObject({ complete: false });
+    expect(structuredOf(partial).notice).toContain('Requested limit 501; effective limit 500.');
+    expect(structuredOf(partial).notice).toContain('this result is partial');
+    expect(textOf(partial.content)).toContain(String(structuredOf(partial).notice));
+  });
+  it.each([501, 1_000_000])(
+    'discloses a clamped display request of %s on both surfaces',
+    async (limit) => {
+      const result = await runToolContract(getPopulationTool, { origin: 'SYR', limit });
+      const structured = structuredOf(result);
+      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
+      expect(textOf(result.content)).toContain(String(structured.notice));
+      expect(structured).not.toHaveProperty('truncated');
+    },
+  );
   it('returns an under-cap page through the production enrichment parse', async () => {
     const result = await runToolContract(getPopulationTool, { origin: 'SYR', asylum: 'DEU' });
     const structured = structuredOf(result);
@@ -373,7 +442,7 @@ describe('scope inputs', () => {
     ['a fractional year', { year_from: 2020.5 }],
     ['a non-numeric year', { year_from: 'recent' as unknown as number }],
     ['limit 0', { limit: 0 }],
-    ['limit above 500', { limit: 501 }],
+    ['limit above hard ceiling', { limit: 1_000_001 }],
     ['an unknown expand', { expand: 'sideways' as 'none' }],
     ['a sort field this tool lacks', { sort_by: 'total' as 'year' }],
     ['more than 50 codes as a list', { origin: Array.from({ length: 51 }, () => 'SYR') }],

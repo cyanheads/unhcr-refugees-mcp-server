@@ -191,6 +191,7 @@ describe('error log severity', () => {
       unhcr_get_solutions: SCOPE_MISTAKES,
       unhcr_dataframe_describe: { canvas_unavailable: 'warning', listing_unavailable: 'notice' },
       unhcr_dataframe_query: {
+        result_storage_unavailable: 'warning',
         canvas_unavailable: 'warning',
         missing_table: 'notice',
         invalid_sql: 'notice',

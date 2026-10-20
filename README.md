@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Overview
 
-Displacement statistics from the keyless [UNHCR Refugee Data Finder API](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations by country of origin and asylum from 1951, asylum applications and decisions from 2000, and returns, resettlement, and naturalisation from 1959. Resolve country names to ISO3 codes, pull annual figures with notes on how to read them, and run SQL over results too large to return inline. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Refugee and displacement statistics from the [UNHCR Refugee Data Finder](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations since 1951, asylum applications and decisions since 2000, and returns and resettlement since 1959. Pull annual figures by country of origin and asylum, and run SQL over large results. No API key required.
 
 ### Tools
 
@@ -61,7 +61,7 @@ Dataframes run on DuckDB's native binding, which the npm and Docker installs car
 The five `unhcr_get_*` tools share one contract:
 
 - **Scope:** `origin` and `asylum` take ISO3 codes, case-insensitive, as a string or a list, up to 50 each. ISO2 codes are rewritten to ISO3; UNHCR's own codes and country names are rejected. Each listed code returns its own rows, and an omitted dimension is summed into one row unless `expand` (`origin`, `asylum`, or `both`) lists every country. `year_from` / `year_to` default to the dataset's span and are clamped to it.
-- **Rows:** the full result is sorted by `sort_by`, then cut to `limit` (1–500, default 100). Where dataframes are on, the full set of a larger result is staged, and `stage: true` stages a result that fits too.
+- **Rows:** the full result is sorted by `sort_by`, then cut to `limit` (default 100). Requests from 1 to 1,000,000 are accepted; values above 500 clamp to 500, with requested and effective limits disclosed even for an empty or small result. Where dataframes are on, the full set of a larger result is staged, and `stage: true` stages a result that fits too.
 - **Output:** `total_rows`, `complete` (false when `UNHCR_MAX_ROWS` stopped the fetch), `measure` (`stock` or `flow`), `applied_scope`, `latest_year`, `dataset` when staged, `data_notes`, and `attribution`.
 - **Errors:** `unknown_country_code`, `invalid_year_window`, `year_out_of_coverage`, `conflicting_scope`, and the retryable `upstream_busy`, which carries `retryAfter`.
 
@@ -116,15 +116,25 @@ The five `unhcr_get_*` tools share one contract:
 ### `unhcr_dataframe_describe` <sub>tool</sub>
 
 - Optional `name` (`df_XXXXX_XXXXX`); omit it to list every staged table, newest first. Over HTTP with `MCP_AUTH_MODE=none` listing is off and `name` is required
-- Each entry gives `source_tool`, `query_params`, `created_at`, `expires_at`, `row_count`, `complete`, `providers`, and `column_schema`. Staged tables add `origin_unhcr_region`, `origin_unsd_region`, `asylum_unhcr_region`, and `asylum_unsd_region` columns the inline rows omit
+- Each entry gives `source_tool`, `query_params`, `created_at`, `expires_at`, `row_count`, `complete`, `incomplete_sources`, `providers`, and `column_schema`. Saved descendants retain original incomplete-source handles after their ancestors expire or are evicted. Staged tables add `origin_unhcr_region`, `origin_unsd_region`, `asylum_unhcr_region`, and `asylum_unsd_region` columns the inline rows omit
 
 ---
 
 ### `unhcr_dataframe_query` <sub>tool</sub>
 
-- `sql` is one DuckDB `SELECT` of at most 20,000 characters; joins, aggregates, window functions, and CTEs work. Writes, DDL, `PRAGMA`, `ATTACH`, file-reading functions, and system catalogs are rejected with a typed reason
+- `sql` is one DuckDB `SELECT` of at most 20,000 characters; joins, aggregates, window functions, and CTEs work. Writes, DDL, `PRAGMA`, `ATTACH`, file references, external-data functions, engine introspection (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), dynamic table lookup (`query_table`), and system catalogs are rejected with a typed reason. `query()` accepts only a single SQL string literal, checked by the same gate
 - `row_limit` (1–10,000, default 1,000) caps the rows the query materializes, and `row_count_capped` flags a capped result. `preview` returns fewer rows inline; `register_as` saves the result under a new `df_XXXXX_XXXXX` name with a fresh TTL. It counts toward the 1,000,000-row staging budget, and a result that alone exceeds it fails `register_as_too_large`
 - `SUM` and `COUNT` values come back as strings (BIGINT). `attribution` credits the third-party series of every table the SQL reads
+- `preview` accepts 0–1,000,000 and clamps to `row_limit`, disclosing requested and effective values. Zero still returns no preview rows. `complete` and `incomplete_sources` describe upstream coverage independently of display truncation: aggregates, joins and saved descendants remain partial if an original source was partial
+- The serialized tool result, including both response surfaces and notices, stays within 65,536 UTF-8 bytes. Whole rows or oversized metadata are withheld identically; values are never clipped. `result_chunks` identifies a tenant-scoped snapshot of the materialized columns, rows and result metadata. It has the usual TTL and shares the staging budget; `result_storage_unavailable` means that snapshot could not be retained. A saved `register_as` table remains available
+
+For a `result_chunks.name` such as `df_ABCDE_12345`, read one chunk per call:
+
+```sql
+SELECT chunk_index,chunk FROM df_ABCDE_12345 WHERE chunk_index=0
+```
+
+Increment the index through `result_chunks.chunk_count - 1`. Base64-decode each chunk separately (at most 6,144 source bytes), concatenate the decoded bytes in index order, then decode UTF-8 and parse JSON. A byte boundary may split a Unicode character, so decode UTF-8 only after joining the bytes. The snapshot contains rows materialized up to `row_limit`, including rows hidden by `preview`; `row_count_capped` still means additional matching rows were not materialized. For the full registered result, query `registered_as`. Small scalar results use Markdown tables; values needing exact whitespace, control characters, nested structures or Markdown syntax use fenced JSON.
 
 ---
 

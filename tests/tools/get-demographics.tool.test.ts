@@ -79,6 +79,16 @@ const bandsOf = (row: Row) => BAND_FIELDS.map((field) => row[field]);
 const syr2025: Input = { origin: 'SYR', year_from: 2025 };
 
 describe('success, both surfaces', () => {
+  it.each([501, 1_000_000])(
+    'discloses a clamped display request of %s on both surfaces',
+    async (limit) => {
+      const result = await runToolContract(getDemographicsTool, { origin: 'SYR', limit });
+      const structured = structuredOf(result);
+      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
+      expect(textOf(result.content)).toContain(String(structured.notice));
+      expect(structured).not.toHaveProperty('truncated');
+    },
+  );
   it('returns an under-cap page through the production enrichment parse', async () => {
     const result = await runToolContract(getDemographicsTool, { origin: 'SYR', asylum: 'DEU' });
     const structured = structuredOf(result);

@@ -96,6 +96,20 @@ describe('pure helpers', () => {
     ).toEqual(['df_ABCDE_12345', 'df_ZZZZZ_00000']);
   });
 
+  it('follows nested literal query statements while ignoring strings and comments at every level', () => {
+    const inner =
+      "SELECT * FROM df_abcde_12345 WHERE 'df_FALSE_00001' = 'df_FALSE_00001' /* df_FALSE_00002 */";
+    const middle = `SELECT * FROM query('${inner.replaceAll("'", "''")}')`;
+    expect(
+      referencedDataframes(
+        `SELECT * FROM query('${middle.replaceAll("'", "''")}') -- df_FALSE_00003`,
+      ),
+    ).toEqual(['df_ABCDE_12345']);
+    expect(
+      referencedDataframes("SELECT 'query(''SELECT * FROM df_FALSE_00004'')' AS text"),
+    ).toEqual([]);
+  });
+
   it('skips handles inside line and block comments, but not a string that holds comment markers', () => {
     expect(
       referencedDataframes(
@@ -345,6 +359,127 @@ describe('query', () => {
     });
     expect(previewed.result.rows).toHaveLength(1);
     expect(previewed.result.rowCount).toBe(2);
+  });
+
+  it('retains both incomplete roots across joined descendants after ancestor eviction and expiry', async () => {
+    const ctx = queryContext();
+    const bridge = new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 5 });
+    const first = await bridge.register(ctx, { ...stagedRows(), complete: false });
+    const second = await bridge.register(ctx, {
+      ...stagedRows(),
+      complete: false,
+      providers: ['UNRWA'],
+    });
+    const roots = [first!.name, second!.name].sort();
+    const child = await bridge.query(
+      ctx,
+      `SELECT a.year FROM "${first!.name.toLowerCase()}" a JOIN ${second!.name} b USING(year)`,
+      { rowLimit: 10, registerAs: 'df_CHILD_00020' },
+    );
+    expect(child).toMatchObject({
+      complete: false,
+      incompleteSources: roots,
+      providers: ['IDMC', 'UNRWA'],
+    });
+    expect(child.evicted).toHaveLength(1);
+    for (const root of roots) {
+      const [meta] = await bridge.describe(ctx, root);
+      if (meta)
+        await ctx.state.set(`df-meta/${root}`, { ...meta, expiresAt: '2000-01-01T00:00:00.000Z' });
+    }
+    const grandchild = await bridge.query(
+      ctx,
+      "SELECT * FROM query('SELECT * FROM df_CHILD_00020') WHERE false",
+      { rowLimit: 1, preview: 0, registerAs: 'df_GRAND_00020' },
+    );
+    expect(grandchild).toMatchObject({
+      complete: false,
+      incompleteSources: roots,
+      result: { rows: [] },
+      meta: { complete: false, incompleteSources: roots },
+    });
+    expect((await bridge.describe(ctx)).some((meta) => roots.includes(meta.tableName))).toBe(false);
+    expect(await bridge.query(ctx, 'SELECT 1 AS n', { rowLimit: 1 })).toMatchObject({
+      complete: true,
+      incompleteSources: [],
+    });
+  });
+});
+
+describe('result chunk retention', () => {
+  const provenance = { complete: false, incompleteSources: ['df_ROOTS_00001'], providers: [] };
+
+  it('accounts chunks in the row budget while protecting the source snapshot and saved table', async () => {
+    const bridge = new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 5 });
+    const ctx = queryContext();
+    const saved = await bridge.register(ctx, rowsOf(2));
+    const original = await bridge.stageResultChunks(ctx, { value: 'x' }, provenance, [saved!.name]);
+    const next = await bridge.stageResultChunks(ctx, { value: 'x'.repeat(7000) }, provenance, [
+      original.name,
+      saved!.name,
+    ]);
+    expect((await bridge.describe(ctx)).map((meta) => meta.tableName).sort()).toEqual(
+      [saved!.name, original.name, next.name].sort(),
+    );
+    await expect(
+      bridge.stageResultChunks(ctx, { value: 'x'.repeat(13000) }, provenance, [
+        original.name,
+        saved!.name,
+      ]),
+    ).rejects.toMatchObject({ data: { reason: 'result_storage_unavailable', retryable: false } });
+    expect(await canvasTables(ctx)).toEqual([saved!.name, original.name, next.name].sort());
+    expect((await bridge.describe(ctx, next.name))[0]).toMatchObject({
+      resultChunks: true,
+      complete: false,
+      incompleteSources: provenance.incompleteSources,
+    });
+  });
+
+  it('keeps a chunk source while register_as saves a page and refuses an oversized protected pair', async () => {
+    const bridge = new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
+    const ctx = queryContext();
+    const source = await bridge.stageResultChunks(ctx, { value: 'x'.repeat(7000) }, provenance);
+    await bridge.query(ctx, `SELECT * FROM ${source.name} LIMIT 1`, {
+      rowLimit: 1,
+      registerAs: 'df_SAVED_00021',
+    });
+    expect(await bridge.describe(ctx, source.name)).toHaveLength(1);
+    await expect(
+      bridge.query(ctx, `SELECT * FROM ${source.name}`, {
+        rowLimit: 10,
+        registerAs: 'df_SAVED_00022',
+      }),
+    ).rejects.toMatchObject({ data: { reason: 'result_storage_unavailable' } });
+    expect(await bridge.describe(ctx, source.name)).toHaveLength(1);
+    expect(await bridge.describe(ctx, 'df_SAVED_00022')).toEqual([]);
+  });
+
+  it('cleans up a failed chunk registration and returns bounded actionable storage failure', async () => {
+    const drop = vi.fn(async () => true);
+    const stub = {
+      acquire: vi.fn(async () => ({
+        canvasId: 'STUBCANVAS',
+        registerTable: vi.fn(async () => {
+          throw new Error('disk full: private path');
+        }),
+        drop,
+      })),
+    } as unknown as DataCanvas;
+    const bridge = new CanvasBridge(stub, { ttlMs: 60_000 });
+    const ctx = queryContext();
+    await expect(bridge.stageResultChunks(ctx, { value: 'x' }, provenance)).rejects.toMatchObject({
+      data: {
+        reason: 'result_storage_unavailable',
+        retryable: false,
+        recovery: {
+          hint: dataframeQueryTool.errors?.find(
+            (entry) => entry.reason === 'result_storage_unavailable',
+          )?.recovery,
+        },
+      },
+    });
+    expect(drop).toHaveBeenCalledOnce();
+    expect(await bridge.describe(ctx)).toEqual([]);
   });
 });
 

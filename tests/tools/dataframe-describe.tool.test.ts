@@ -171,12 +171,21 @@ describe('unhcr_dataframe_describe', () => {
     disposeUnhcrService();
     initFakeUpstream({ pageSize: { population: 2 }, config: { maxRows: 10_000 } });
     const flow = flowContext();
-    await stagePopulation(flow, { origin: 'SYR', expand: 'asylum', year_from: 2025 });
+    const name = await stagePopulation(flow, { origin: 'SYR', expand: 'asylum', year_from: 2025 });
     const result = await describeIn(flow);
-    expect(result.dataframes[0]).toMatchObject({ complete: false, row_count: 2 });
+    expect(result.dataframes[0]).toMatchObject({
+      complete: false,
+      incomplete_sources: [name],
+      row_count: 2,
+    });
     expect(textOf(dataframeDescribeTool.format!(result))).toContain(
       '**Complete:** no — the row cap stopped the fetch',
     );
+    const wire = await runToolContract(describeSeededFrom(flow), { name });
+    expect(structuredOf(wire).dataframes).toEqual([
+      expect.objectContaining({ incomplete_sources: [name] }),
+    ]);
+    expect(textOf(wire.content)).toContain(`**Incomplete sources:** ${name}`);
   });
 
   it('drops expired dataframes from the listing', async () => {
@@ -260,6 +269,7 @@ describe('unhcr_dataframe_describe', () => {
             expires_at: '2026-09-27T00:00:00.000Z',
             row_count: 1,
             complete: true,
+            incomplete_sources: [],
             providers: [],
             column_schema: [{ name: 'x', type: 'VARCHAR', nullable: false }],
           },

@@ -71,8 +71,8 @@ export const scopeInputs = {
 
 /** Paging and staging controls shared by every data tool. */
 export const resultInputs = {
-  limit: blankAsUnset(z.number().int().min(1).max(500).default(100)).describe(
-    'Rows returned inline, 1–500 (default 100). Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.',
+  limit: blankAsUnset(z.number().int().min(1).max(1_000_000).default(100)).describe(
+    'Requested inline rows, 1–1000000 (default 100); values above 500 are clamped to 500 with disclosure. Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.',
   ),
   stage: blankAsUnset(z.boolean().default(false)).describe(
     'Stage the full result as a dataframe even when it fits inline, e.g. to join it with another unhcr_get_* result in unhcr_dataframe_query. Where dataframes are unavailable it is ignored, and the notice says so.',

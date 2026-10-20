@@ -246,9 +246,12 @@ export async function finishRows<R extends RowIdentity>(
 ): Promise<FinishedRows<R>> {
   const sorted = sortRows(input.rows, input.sortBy);
   const total = sorted.length;
-  const rows = sorted.slice(0, input.limit);
-  const overflow = total > input.limit;
+  const limit = Math.min(input.limit, 500);
+  const rows = sorted.slice(0, limit);
+  const overflow = total > limit;
   const fragments = [...input.scope.clamps];
+  if (input.limit > limit)
+    fragments.push(`Requested limit ${input.limit}; effective limit ${limit}.`);
   if (total === 0) {
     fragments.push(input.emptyNotice ?? emptyResultNotice(input));
   }
@@ -278,7 +281,7 @@ export async function finishRows<R extends RowIdentity>(
   }
 
   const notice = fragments.join(' ');
-  if (overflow) ctx.enrich.truncated({ shown: rows.length, cap: input.limit, guidance: notice });
+  if (overflow) ctx.enrich.truncated({ shown: rows.length, cap: limit, guidance: notice });
   else if (notice) ctx.enrich.notice(notice);
 
   return {

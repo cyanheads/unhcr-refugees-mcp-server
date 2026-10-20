@@ -56,6 +56,11 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
               .describe(
                 'False when the server row cap stopped the upstream fetch that produced it.',
               ),
+            incomplete_sources: z
+              .array(z.string())
+              .describe(
+                'Original incomplete upstream handles retained through saved descendants, even after those ancestors expire or are evicted.',
+              ),
             providers: z
               .array(z.string())
               .describe('Third-party series the rows carry (IDMC, UNRWA), for attribution.'),
@@ -137,6 +142,7 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         expires_at: meta.expiresAt,
         row_count: meta.rowCount,
         complete: meta.complete,
+        incomplete_sources: meta.incompleteSources ?? (meta.complete ? [] : [meta.tableName]),
         providers: meta.providers,
         column_schema: meta.columnSchema.map((column) => ({
           name: column.name,
@@ -155,6 +161,7 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         `### ${df.name}`,
         `- **Source:** ${df.source_tool}`,
         `- **Rows:** ${df.row_count} · **Complete:** ${df.complete ? 'yes' : 'no — the row cap stopped the fetch'}`,
+        `- **Incomplete sources:** ${df.incomplete_sources.length ? df.incomplete_sources.join(', ') : 'none'}`,
         `- **Created:** ${df.created_at} · **Expires:** ${df.expires_at}`,
         `- **Providers:** ${df.providers.length ? df.providers.join(', ') : 'UNHCR only'}`,
         `- **Columns:** ${df.column_schema.map((column) => `${inline(column.name)} ${inline(column.type)} ${column.nullable ? 'nullable' : 'NOT NULL'}`).join(', ')}`,
