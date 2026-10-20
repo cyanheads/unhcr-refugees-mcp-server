@@ -1,6 +1,6 @@
 # unhcr-refugees-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 05:46:48
+Generated on: 2026-10-20 09:17:36
 
 ```text
 unhcr-refugees-mcp-server/
@@ -25,6 +25,7 @@ unhcr-refugees-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -153,6 +154,7 @@ unhcr-refugees-mcp-server/
 │   │           ├── inputs.ts
 │   │           ├── markdown.ts
 │   │           ├── outputs.ts
+│   │           ├── query-output.ts
 │   │           ├── results.ts
 │   │           └── scope.ts
 │   ├── services/
