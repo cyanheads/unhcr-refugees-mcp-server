@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-11-04 · ⚠️ Breaking
+
+Count inputs share one clamped cap and a 25-row default, the SQL byte budget and its chunk fields are removed, footnotes and the nowcast follow the inline cut, and the server publishes its first agent skill.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-10-20 · ⚠️ Breaking
 
 Bounded SQL results and source completeness
