@@ -1,0 +1,33 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "unhcr-refugees-mcp-server",
+  "version": "0.2.0",
+  "description": "Query UNHCR refugee, IDP, and stateless populations, asylum decisions, returns, and resettlement via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/unhcr-refugees-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/unhcr-refugees-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "unhcr",
+    "refugees",
+    "asylum",
+    "displacement",
+    "idp",
+    "statelessness",
+    "humanitarian",
+    "migration",
+    "statistics",
+    "open-data"
+  ]
+}
