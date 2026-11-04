@@ -12,7 +12,7 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DatasetQuery } from '@/services/unhcr/types.js';
 import {
   buildUrl,
@@ -445,16 +445,19 @@ describe('pacing and the call deadline', () => {
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);
     expect(error.message).toContain('45 s budget');
     expect(error.data?.recovery).toEqual({
-      hint: 'Narrow the year window or drop expand so the call needs fewer upstream requests, then retry.',
+      hint: expect.stringContaining(
+        'narrow the year window or drop expand so the call needs fewer upstream requests',
+      ),
     });
   });
 
-  it('fails an already-spent deadline without any request', async () => {
+  it('fails an already-spent deadline without any request, retryable while the cache is on', async () => {
     const { fake, service } = setup();
     const error = await rejectionOf(
       service.population(syrQuery, createMockContext(), { deadlineMs: 0 }),
     );
     expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(error.data?.retryable).toBe(true);
     expect(fake.calls).toHaveLength(0);
   });
 
@@ -491,6 +494,116 @@ describe('pacing and the call deadline', () => {
     await expect(
       service.population(syrQuery, createMockContext({ signal: controller.signal })),
     ).rejects.toMatchObject({ name: 'AbortError', message: 'caller went away' });
+  });
+
+  /**
+   * The call's real 45 s deadline (no `deadlineMs` override) passing partway
+   * through a four-page walk. Time is faked (`setTimeout`, `Date`), so the
+   * deadline, `withRetry`'s clock, the pacer, and the cache TTL all run on the
+   * fake clock and no test waits.
+   */
+  describe('a deadline that passes partway through a page walk', () => {
+    const walkRows = [2022, 2023, 2024, 2025].map((year, i) =>
+      populationRow(
+        year,
+        'SYR',
+        null,
+        Array.from({ length: 9 }, () => i + 1),
+      ),
+    );
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Page 3 hangs until aborted while `stall.on` holds; pages 1, 2, and 4 answer at once. */
+    function stalledWalk(config: Partial<UnhcrServiceConfig> = {}) {
+      const stall = { on: true };
+      const { fake, service } = setup({ config });
+      fake.intercept({
+        endpoint: 'population',
+        respond: (request) => {
+          const page = Number(new URL(request.url).searchParams.get('page'));
+          if (page === 3 && stall.on) return hangUntilAborted(request);
+          return Response.json(envelope(walkRows.slice(page - 1, page), { maxPages: 4, page }));
+        },
+      });
+      const pages = () => fake.urlsFor('population').map((url) => url.searchParams.get('page'));
+      return { pages, service, stall };
+    }
+
+    /** Run one call until its 45 s deadline on the fake clock, returning the rejection. */
+    async function atDeadline(call: Promise<unknown>): Promise<McpError> {
+      const rejection = rejectionOf(call);
+      await vi.advanceTimersByTimeAsync(45_000);
+      return rejection;
+    }
+
+    it('caches the pages that finished, so the identical retry fetches only the unfinished one', async () => {
+      const { pages, service, stall } = stalledWalk();
+      const error = await atDeadline(service.population(syrQuery, createMockContext()));
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(pages()).toEqual(['1', '2', '3', '4']);
+
+      stall.on = false;
+      const retry = await service.population(syrQuery, createMockContext());
+      expect(pages().slice(4)).toEqual(['3']);
+      expect(retry.rows.map((row) => row.refugees)).toEqual([1, 2, 3, 4]);
+      expect(retry.complete).toBe(true);
+    });
+
+    it('marks the Timeout retryable and says a prompt identical retry resumes from the cached pages', async () => {
+      const { service } = stalledWalk();
+      const error = await atDeadline(service.population(syrQuery, createMockContext()));
+      const hint =
+        'Pages fetched before the deadline are cached, so retrying the identical call promptly resumes from them and fetches only the rest. If the retry also times out, narrow the year window or drop expand so the call needs fewer upstream requests.';
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toEqual({ retryable: true, recovery: { hint } });
+      expect(error.message).toBe(`UNHCR did not answer within this call's 45 s budget. ${hint}`);
+    });
+
+    it('with the cache off, fails with the narrowing-only Timeout and restarts the identical retry from page 1', async () => {
+      const { pages, service, stall } = stalledWalk({ cacheMaxBytes: 0 });
+      const error = await atDeadline(service.population(syrQuery, createMockContext()));
+      const hint =
+        'Narrow the year window or drop expand so the call needs fewer upstream requests, then retry.';
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toEqual({ recovery: { hint } });
+      expect(error.message).toBe(`UNHCR did not answer within this call's 45 s budget. ${hint}`);
+
+      stall.on = false;
+      await service.population(syrQuery, createMockContext());
+      expect(pages().slice(4)).toEqual(['1', '2', '3', '4']);
+    });
+
+    it('promises the resume and resumes once the cache holds exactly one full page (UNHCR_CACHE_MAX_MB=4)', async () => {
+      const { pages, service, stall } = stalledWalk({ cacheMaxBytes: 4 * 1024 * 1024 });
+      const error = await atDeadline(service.population(syrQuery, createMockContext()));
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toMatchObject({
+        retryable: true,
+        recovery: { hint: expect.stringContaining('Pages fetched before the deadline are cached') },
+      });
+
+      stall.on = false;
+      await service.population(syrQuery, createMockContext());
+      expect(pages().slice(4)).toEqual(['3']);
+    });
+
+    it('promises no resume when the cache is too small to hold a full upstream page', async () => {
+      const { service } = stalledWalk({ cacheMaxBytes: 4 * 1024 * 1024 - 1 });
+      const error = await atDeadline(service.population(syrQuery, createMockContext()));
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.data).toEqual({
+        recovery: {
+          hint: 'Narrow the year window or drop expand so the call needs fewer upstream requests, then retry.',
+        },
+      });
+    });
   });
 });
 

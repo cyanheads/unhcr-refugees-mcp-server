@@ -36,7 +36,7 @@ import type { ProbedDataset } from './codes.js';
 import { buildCountryTable, type CountryTable } from './country-input.js';
 import { type Footnote, toFootnote } from './footnote-match.js';
 import { toCount, toDataRow, toIdentityText, toYear, type ValueTally } from './normalize.js';
-import { ResponseCache } from './response-cache.js';
+import { MAX_CACHED_BODY, ResponseCache } from './response-cache.js';
 import {
   APPLICATION_FIELDS,
   type AsylumApplicationRow,
@@ -80,8 +80,16 @@ const ATTEMPT_TIMEOUT_MS = 30_000;
 const RESPONSE_TTL_MS = 6 * 60 * 60 * 1000;
 const REFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
+/** Deadline recovery with the response cache off: a retry starts the walk over. */
 const DEADLINE_HINT =
   'Narrow the year window or drop expand so the call needs fewer upstream requests, then retry.';
+/**
+ * Deadline recovery with the cache on. Every page that finished before the
+ * deadline is cached, so a prompt identical retry fetches only the rest; it
+ * does not promise more, since other calls' pages can evict them meanwhile.
+ */
+const DEADLINE_RESUME_HINT =
+  'Pages fetched before the deadline are cached, so retrying the identical call promptly resumes from them and fetches only the rest. If the retry also times out, narrow the year window or drop expand so the call needs fewer upstream requests.';
 
 /** Plain-object configuration; the service never reads the environment itself. */
 export interface UnhcrServiceConfig {
@@ -233,10 +241,18 @@ function retryAfterSeconds(value: unknown): number {
   return DEFAULT_RETRY_AFTER_SECONDS;
 }
 
-function deadlineExceeded(cause?: unknown): McpError {
+/**
+ * The call's spent deadline as a `Timeout`. When the response cache can hold a
+ * full page it is `retryable`, since the identical call resumes from the cached
+ * pages; with the cache off or smaller than one page a retry repeats the same
+ * walk, so only narrowing is offered.
+ */
+function deadlineExceeded(cacheMaxBytes: number, cause?: unknown): McpError {
+  const resumable = cacheMaxBytes >= MAX_CACHED_BODY;
+  const hint = resumable ? DEADLINE_RESUME_HINT : DEADLINE_HINT;
   return timeout(
-    `UNHCR did not answer within this call's ${CALL_BUDGET_MS / 1000} s budget. ${DEADLINE_HINT}`,
-    { recovery: { hint: DEADLINE_HINT } },
+    `UNHCR did not answer within this call's ${CALL_BUDGET_MS / 1000} s budget. ${hint}`,
+    { ...(resumable && { retryable: true }), recovery: { hint } },
     cause === undefined ? undefined : { cause },
   );
 }
@@ -594,7 +610,8 @@ export class UnhcrApiService {
   /**
    * A pacer shed or an exhausted upstream 429 becomes `upstream_busy` with a
    * `retryAfter` and the calling tool's recovery; a spent deadline becomes a
-   * `Timeout` that says how to need fewer requests. Done here, outside
+   * `Timeout` that says whether an identical retry resumes from cached pages
+   * and how to need fewer requests. Done here, outside
    * `withRetry`: inside it, rewrapping would erase the `pacer_shed` reason
    * that makes the retry loop fail fast instead of sleeping past the deadline.
    */
@@ -619,7 +636,7 @@ export class UnhcrApiService {
       );
     }
     if (error.code === JsonRpcErrorCode.Timeout && data.reason === 'retry_deadline_exceeded') {
-      return deadlineExceeded(error);
+      return deadlineExceeded(this.config.cacheMaxBytes, error);
     }
     return error;
   }
@@ -682,7 +699,7 @@ export class UnhcrApiService {
    */
   private load(url: string, ctx: Context, deadlineAt: number): Promise<Envelope> {
     const budget = deadlineAt - Date.now();
-    if (budget <= 0) return Promise.reject(deadlineExceeded());
+    if (budget <= 0) return Promise.reject(deadlineExceeded(this.config.cacheMaxBytes));
     return withRetry(
       async ({ signal }) => {
         const body = await this.pacer.run(() => this.fetchBody(url, signal, deadlineAt), {
