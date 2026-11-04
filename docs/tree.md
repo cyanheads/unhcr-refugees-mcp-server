@@ -1,6 +1,6 @@
 # unhcr-refugees-mcp-server - Directory Structure
 
-Generated on: 2026-10-20 09:17:36
+Generated on: 2026-11-04 10:07:01
 
 ```text
 unhcr-refugees-mcp-server/
@@ -37,6 +37,8 @@ unhcr-refugees-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -134,6 +136,9 @@ unhcr-refugees-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── unhcr-refugees-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -151,6 +156,7 @@ unhcr-refugees-mcp-server/
 │   │       │   ├── index.ts
 │   │       │   └── list-reference.tool.ts
 │   │       └── shared/
+│   │           ├── counts.ts
 │   │           ├── inputs.ts
 │   │           ├── markdown.ts
 │   │           ├── outputs.ts
@@ -182,6 +188,8 @@ unhcr-refugees-mcp-server/
 │   │   └── services.ts
 │   ├── live/
 │   │   └── upstream-behavior.test.ts
+│   ├── scripts/
+│   │   └── mcpb-agent-doc-entry.test.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   └── canvas-bridge.test.ts
@@ -222,7 +230,9 @@ unhcr-refugees-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

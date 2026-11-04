@@ -1,18 +1,11 @@
 /**
- * @fileoverview Lossless SQL result rendering and a conservative serialized tool-result byte bound.
+ * @fileoverview Lossless `content[]` rendering of unhcr_dataframe_query results:
+ * a Markdown table when every label and cell is plain, fenced JSON otherwise.
  * @module mcp-server/tools/shared/query-output
  */
 
 import { fence, table } from './markdown.js';
 import { type Attribution, renderAttribution, renderEvicted } from './outputs.js';
-
-/** Retrieval metadata for the canonical materialized result snapshot. */
-export interface ResultChunks {
-  chunk_count: number;
-  encoding: 'base64-json-utf8';
-  expires_at: string;
-  name: string;
-}
 
 /** Domain payload of unhcr_dataframe_query, before framework enrichment. */
 export interface QueryOutput {
@@ -22,24 +15,11 @@ export interface QueryOutput {
   evicted?: string[];
   expires_at?: string;
   incomplete_sources: string[];
-  metadata_withheld?: boolean;
   registered_as?: string;
-  result_chunks?: ResultChunks;
   row_count: number;
   row_count_capped: boolean;
   rows: Record<string, unknown>[];
 }
-
-/** The bounded display disclosure merged by the framework. */
-export interface QueryDisclosure {
-  cap?: number;
-  notice?: string;
-  shown?: number;
-  truncated?: boolean;
-}
-
-/** Maximum UTF-8 bytes of the serialized tool result, across both response surfaces. */
-export const QUERY_RESULT_MAX_BYTES = 65_536;
 
 /** Query cells with Markdown or control syntax use fenced JSON, preserving exact values and labels. */
 export function formatQueryOutput(result: QueryOutput): { type: 'text'; text: string }[] {
@@ -57,11 +37,6 @@ export function formatQueryOutput(result: QueryOutput): { type: 'text'; text: st
   lines.push(
     `Complete: ${result.complete}. Incomplete sources: ${result.incomplete_sources.length ? result.incomplete_sources.join(', ') : 'none'}.`,
   );
-  if (result.metadata_withheld)
-    lines.push(
-      'Column names or incomplete-source handles are withheld inline; the result snapshot preserves them.',
-    );
-  if (result.result_chunks) lines.push(`Result chunks: ${JSON.stringify(result.result_chunks)}`);
   const simple = (value: unknown): boolean =>
     typeof value === 'number' ||
     typeof value === 'boolean' ||
@@ -87,22 +62,4 @@ export function formatQueryOutput(result: QueryOutput): { type: 'text'; text: st
   }
   lines.push('', renderAttribution(result.attribution));
   return [{ type: 'text', text: lines.join('\n') }];
-}
-
-/**
- * Count both serialized surfaces and reserve more than the framework's bounded
- * enrichment trailer requires. The final contract tests measure the actual
- * trailer; the reserve also leaves 2 KiB for normal transport envelopes.
- */
-export function queryResultBytes(output: QueryOutput, disclosure: QueryDisclosure): number {
-  return (
-    Buffer.byteLength(
-      JSON.stringify({
-        content: formatQueryOutput(output),
-        structuredContent: { ...output, ...disclosure },
-      }),
-    ) +
-    2 * Buffer.byteLength(JSON.stringify(disclosure)) +
-    2048
-  );
 }

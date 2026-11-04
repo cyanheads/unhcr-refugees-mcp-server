@@ -8,6 +8,7 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { MAX_COUNTRY_CODES } from '@/services/unhcr/country-input.js';
+import { countSchema } from './counts.js';
 
 /** A blank from a form client — empty or whitespace only — is unset, never a value to validate. */
 export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
@@ -32,20 +33,24 @@ export const codeList = <const T extends readonly [string, ...string[]]>(codes: 
     ),
   );
 
+/**
+ * A country filter, as a string or a list. `parseCodeList` counts the cap on
+ * distinct codes for both forms; these schema bounds sit above it, so any
+ * well-formed list reaches that one check. The string bound fits the cap in the
+ * widest accepted spelling, `["ABW", "AFG"]` (7 characters a code); the list
+ * bound counts entries before de-duplication.
+ */
 const countryList = (dimension: string) =>
   blankAsUnset(
     z
       .union([
         z
           .string()
-          .max(1_000)
+          .max(MAX_COUNTRY_CODES * 7)
           .describe(
             'One code, or several separated by commas or spaces, e.g. "SYR" or "SYR, AFG".',
           ),
-        z
-          .array(z.string().max(100))
-          .max(MAX_COUNTRY_CODES)
-          .describe(`Codes as a list, e.g. ["SYR", "AFG"]; at most ${MAX_COUNTRY_CODES}.`),
+        z.array(z.string().max(100)).max(1_000).describe('Codes as a list, e.g. ["SYR", "AFG"].'),
       ])
       .optional(),
   ).describe(dimension);
@@ -53,10 +58,10 @@ const countryList = (dimension: string) =>
 /** Country filters, expand, and the year window shared by every data tool. */
 export const scopeInputs = {
   origin: countryList(
-    `Country of origin — where people fled from — as ISO3 codes (SYR, AFG), case-insensitive. ISO 3166 alpha-2 codes (SY) are rewritten to ISO3 and echoed in applied_scope. UNHCR's own codes (GFR) are rejected with the ISO3 to pass instead, and country names are rejected: resolve a name with unhcr_list_reference (topic countries, name_contains). Each listed code returns its own rows; codes are never summed together. At most ${MAX_COUNTRY_CODES} codes. Omit to sum every origin into one row, or set expand to list each.`,
+    `Country of origin — where people fled from — as ISO3 codes (SYR, AFG), case-insensitive. ISO 3166 alpha-2 codes (SY) are rewritten to ISO3 and echoed in applied_scope. UNHCR's own codes (GFR) are rejected with the ISO3 to pass instead, and country names are rejected: resolve a name with unhcr_list_reference (topic countries, name_contains). Each listed code returns its own rows; codes are never summed together. At most ${MAX_COUNTRY_CODES} distinct codes, enough to list every country in UNHCR's country list. Omit to sum every origin into one row, or set expand to list each.`,
   ),
   asylum: countryList(
-    `Country of asylum — where people sought or hold protection; for returns, the country they returned from — as ISO3 codes (DEU, TUR), case-insensitive, same rules as origin. At most ${MAX_COUNTRY_CODES} codes. Omit to sum every asylum country into one row, or set expand to list each.`,
+    `Country of asylum — where people sought or hold protection; for returns, the country they returned from — as ISO3 codes (DEU, TUR), case-insensitive, same rules and limit as origin. Omit to sum every asylum country into one row, or set expand to list each.`,
   ),
   expand: blankAsUnset(z.enum(['none', 'origin', 'asylum', 'both']).default('none')).describe(
     'List every country, one row each, for a dimension that origin or asylum leaves unfiltered: origin, asylum, or both. Default none, where an unfiltered dimension is summed into one row. Expanding a dimension that origin or asylum already filters is rejected.',
@@ -69,11 +74,24 @@ export const scopeInputs = {
   ),
 };
 
-/** Paging and staging controls shared by every data tool. */
+/** Most inline rows one data-tool call returns. */
+export const LIMIT_CAP = 2_000;
+
+/**
+ * The data tools' `limit` for one clamp mode: by default a value above
+ * {@link LIMIT_CAP} is served at the cap with a notice (`finishRows` clamps
+ * it); with `UNHCR_CLAMP_LIMITS=false` the schema rejects it.
+ */
+export const limitInput = (clamp: boolean) =>
+  blankAsUnset(countSchema(1, LIMIT_CAP, clamp).default(25)).describe(
+    clamp
+      ? `Inline rows. Default 25; a larger value returns at most ${LIMIT_CAP} and says so. Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.`
+      : `Inline rows, 1–${LIMIT_CAP} (default 25). Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.`,
+  );
+
+/** Paging and staging controls shared by every data tool, in the default clamp mode. */
 export const resultInputs = {
-  limit: blankAsUnset(z.number().int().min(1).max(1_000_000).default(100)).describe(
-    'Requested inline rows, 1–1000000 (default 100); values above 500 are clamped to 500 with disclosure. Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.',
-  ),
+  limit: limitInput(true),
   stage: blankAsUnset(z.boolean().default(false)).describe(
     'Stage the full result as a dataframe even when it fits inline, e.g. to join it with another unhcr_get_* result in unhcr_dataframe_query. Where dataframes are unavailable it is ignored, and the notice says so.',
   ),

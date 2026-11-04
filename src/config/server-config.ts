@@ -47,6 +47,12 @@ const ServerConfigSchema = z.object({
     .describe(
       'Registers unhcr_dataframe_drop live instead of disabled. Off by default; the per-table TTL reclaims staged tables on its own.',
     ),
+  clampLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Serves a count input (limit, preview, row_limit) above its cap at the cap, with a notice. false advertises the cap as a schema maximum and rejects a larger value instead.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -61,6 +67,7 @@ export function getServerConfig(): ServerConfig {
     cacheMaxMb: 'UNHCR_CACHE_MAX_MB',
     datasetTtlSeconds: 'UNHCR_DATASET_TTL_SECONDS',
     dataframeDropEnabled: 'UNHCR_DATAFRAME_DROP_ENABLED',
+    clampLimits: 'UNHCR_CLAMP_LIMITS',
   });
   return _config;
 }

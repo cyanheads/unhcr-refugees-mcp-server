@@ -13,7 +13,12 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getAsylumDecisionsTool } from '@/mcp-server/tools/definitions/get-asylum-decisions.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -84,16 +89,23 @@ const rates = (row: Row) => [
 const syrPairs: Input = { origin: 'SYR', expand: 'asylum' };
 
 describe('success, both surfaces', () => {
-  it.each([501, 1_000_000])(
-    'discloses a clamped display request of %s on both surfaces',
-    async (limit) => {
-      const result = await runToolContract(getAsylumDecisionsTool, { origin: 'SYR', limit });
-      const structured = structuredOf(result);
-      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
-      expect(textOf(result.content)).toContain(String(structured.notice));
-      expect(structured).not.toHaveProperty('truncated');
-    },
-  );
+  it.each([2_001])('discloses a clamped display request of %s on both surfaces', async (limit) => {
+    const result = await runToolContract(getAsylumDecisionsTool, { origin: 'SYR', limit });
+    const structured = structuredOf(result);
+    expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 2000.`);
+    expect(textOf(result.content)).toContain(String(structured.notice));
+    expect(structured).not.toHaveProperty('truncated');
+  });
+  it('logs a clamped limit under this tool’s name', async () => {
+    const ctx = context();
+    await call({ origin: 'SYR', limit: 2_001 }, ctx);
+    const clampLines = (ctx.log as MockContextLogger).calls.filter(
+      (line) => line.msg === 'Count input clamped',
+    );
+    expect(clampLines.map((line) => line.data)).toEqual([
+      { tool: 'unhcr_get_asylum_decisions', field: 'limit', requested: 2_001, effective: 2_000 },
+    ]);
+  });
   it('returns an under-cap page through the production enrichment parse', async () => {
     const result = await runToolContract(getAsylumDecisionsTool, { origin: 'SYR', asylum: 'DEU' });
     const structured = structuredOf(result);
@@ -661,10 +673,11 @@ describe('declared errors, by reason', () => {
 });
 
 describe('declared surface', () => {
-  it('declares the five shared reasons, upstream_busy retryable, and read-only open-world annotations', () => {
+  it('declares the six shared reasons, upstream_busy retryable, and read-only open-world annotations', () => {
     expect(getAsylumDecisionsTool.errors?.map((entry) => entry.reason).sort()).toEqual([
       'conflicting_scope',
       'invalid_year_window',
+      'too_many_country_codes',
       'unknown_country_code',
       'upstream_busy',
       'year_out_of_coverage',

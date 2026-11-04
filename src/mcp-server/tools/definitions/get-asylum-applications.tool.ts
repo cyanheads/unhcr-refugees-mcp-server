@@ -149,6 +149,15 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
         'Either list codes in origin/asylum or expand that dimension, not both; drop the codes to list every country.',
     },
     {
+      reason: 'too_many_country_codes',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      thrownBy: 'service',
+      when: 'origin or asylum lists more distinct codes than one filter accepts',
+      recovery:
+        'List fewer distinct codes in origin or asylum, or leave that filter empty and set expand to list every country.',
+    },
+    {
       reason: 'upstream_busy',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
@@ -206,7 +215,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
     });
 
     return {
-      ...finished,
+      ...finished.output,
       measure: 'flow' as const,
       data_notes: dataNotes({
         otherStages: aggregated.rows.some((row) => row.stages.some((code) => code !== 'N')),

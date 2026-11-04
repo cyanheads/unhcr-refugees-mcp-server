@@ -24,6 +24,17 @@ export function textOf(blocks: ToolResult['content'] | readonly { type: string }
     .join('\n');
 }
 
+/**
+ * Markdown prose as a CommonMark reader sees it: each backslash escape (a
+ * backslash before ASCII punctuation) decoded to the character it escapes. The
+ * framework renders an error's message and recovery hint into `content[]`
+ * through `escapeMarkdownInline`, so assert those strings on this, never on a
+ * code span, where a backslash is literal.
+ */
+export function unescapeMarkdown(text: string): string {
+  return text.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+
 /** The structured success payload, asserting the call did not fail. */
 export function structuredOf(result: ToolResult): Record<string, unknown> {
   if (result.isError) throw new Error(`Expected success, got: ${textOf(result.content)}`);

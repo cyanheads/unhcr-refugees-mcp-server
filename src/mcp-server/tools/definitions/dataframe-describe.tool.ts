@@ -21,14 +21,14 @@ import { fence, inline } from '../shared/markdown.js';
 export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
   title: 'Describe staged dataframes',
   description:
-    'Describe a dataframe (df_XXXXX_XXXXX) staged by the unhcr_get_* tools — any response carrying a dataset handle staged its full result here — or list them all where this deployment allows listing. Each entry gives the source tool, query parameters, creation and expiry time, row count, whether the upstream fetch was complete, and the column schema. Read the columns here before writing SQL for unhcr_dataframe_query.',
+    'Describe a dataframe (df_XXXXX_XXXXX) staged by the unhcr_get_* tools — any response carrying a dataset or nowcast_dataset handle staged its full result here — or list them all where this deployment allows listing. Each entry gives the source tool, query parameters, creation and expiry time, row count, whether the upstream fetch was complete, and the column schema. Read the columns here before writing SQL for unhcr_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
     name: blankAsUnset(
       z.string().max(DATAFRAME_NAME_LENGTH).regex(DATAFRAME_NAME).optional(),
     ).describe(
-      'One dataframe to describe, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name a unhcr_get_* result returned, or a register_as name. Omit to list every staged dataframe; a deployment that serves unauthenticated callers over HTTP turns listing off, and there the name is required.',
+      'One dataframe to describe, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name or nowcast_dataset.name a unhcr_get_* result returned, or a register_as name. Omit to list every staged dataframe; a deployment that serves unauthenticated callers over HTTP turns listing off, and there the name is required.',
     ),
   }),
 

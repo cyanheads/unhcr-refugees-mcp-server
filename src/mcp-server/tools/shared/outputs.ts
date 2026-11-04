@@ -175,7 +175,7 @@ export const dataEnrichment = {
     .string()
     .optional()
     .describe(
-      'Guidance for this result: empty-result hints, year clamps, where the full set was staged, or how to narrow.',
+      'Guidance for this result: empty-result hints, year and limit clamps, where the full set was staged, or how to narrow.',
     ),
   truncated: z.boolean().optional().describe('True when rows were cut at limit.'),
   shown: z.number().optional().describe('Rows returned inline.'),

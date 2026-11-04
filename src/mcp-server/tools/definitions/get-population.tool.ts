@@ -27,16 +27,18 @@ import {
   countField,
   countryCell,
   dataEnrichment,
+  datasetSchema,
   footnoteSchema,
   identityCells,
   identityFields,
   normalizationNotes,
+  renderEvicted,
   renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
   sharedResultFields,
 } from '../shared/outputs.js';
-import { buildAttribution, finishRows } from '../shared/results.js';
+import { finishRows } from '../shared/results.js';
 import { appliedScope, resolveScope } from '../shared/scope.js';
 
 /** A population row with the companion series joined beside it. */
@@ -181,7 +183,7 @@ export const getPopulationTool = tool('unhcr_get_population', {
   input: z.object({
     ...scopeInputs,
     include_nowcast: blankAsUnset(z.boolean().default(false)).describe(
-      "Append UNHCR's latest monthly estimate of refugees and asylum-seekers by asylum country: one current-year snapshot, independent of the year window. The nowcast has no origin dimension, so it is skipped when origin lists codes. When origin lists no codes, a window entirely after the latest published year returns the nowcast alone instead of failing.",
+      "Append UNHCR's latest monthly estimate of refugees and asylum-seekers by asylum country: one current-year snapshot, independent of the year window. It is sorted and cut to limit on its own, and staged as its own dataframe (nowcast_dataset) when it overflows or stage is set. The nowcast has no origin dimension, so it is skipped when origin lists codes. When origin lists no codes, a window entirely after the latest published year returns the nowcast alone instead of failing.",
     ),
     sort_by: blankAsUnset(
       z
@@ -199,7 +201,7 @@ export const getPopulationTool = tool('unhcr_get_population', {
         ])
         .default('year'),
     ).describe(
-      'Order of the full result before the inline cut. year (default) orders by year, then origin ISO3, then asylum ISO3; a count field orders largest first, nulls last.',
+      'Order of the full result before the inline cut. year (default) orders by year, then origin ISO3, then asylum ISO3; a count field orders largest first, nulls last. The nowcast is ordered by refugees or asylum_seekers when sort_by names one, otherwise by asylum ISO3.',
     ),
     ...resultInputs,
   }),
@@ -241,13 +243,25 @@ export const getPopulationTool = tool('unhcr_get_population', {
     footnotes: z
       .array(footnoteSchema)
       .describe(
-        'UNHCR caveats matching rows of the full result, country-specific first; at most 20.',
+        'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
       ),
     footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
     nowcast: z
       .array(nowcastSchema)
       .optional()
-      .describe('Present when include_nowcast was set and origin lists no codes.'),
+      .describe(
+        "UNHCR's current-year estimate by asylum country, sorted and cut to limit apart from rows: largest first by refugees or asylum_seekers when sort_by names one (nulls last, ties by asylum ISO3), otherwise by asylum ISO3. Present when include_nowcast was set and origin lists no codes.",
+      ),
+    nowcast_total: z
+      .number()
+      .int()
+      .optional()
+      .describe('Nowcast rows before the cut at limit. Present whenever nowcast is.'),
+    nowcast_dataset: datasetSchema
+      .describe(
+        'Present when the nowcast was staged as its own dataframe, because it overflowed limit or stage was set: columns year, month, asylum_iso3, asylum_unhcr_code, asylum_name, asylum_unhcr_region, asylum_unsd_region, refugees, asylum_seekers, source, and no origin columns. It stays apart from dataset because both count largely the same people at different dates; read its columns with unhcr_dataframe_describe, then query it with unhcr_dataframe_query.',
+      )
+      .optional(),
   }),
 
   enrichment: dataEnrichment,
@@ -286,6 +300,15 @@ export const getPopulationTool = tool('unhcr_get_population', {
         'Either list codes in origin/asylum or expand that dimension, not both; drop the codes to list every country.',
     },
     {
+      reason: 'too_many_country_codes',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      thrownBy: 'service',
+      when: 'origin or asylum lists more distinct codes than one filter accepts',
+      recovery:
+        'List fewer distinct codes in origin or asylum, or leave that filter empty and set expand to list every country.',
+    },
+    {
       reason: 'upstream_busy',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
@@ -299,6 +322,16 @@ export const getPopulationTool = tool('unhcr_get_population', {
   async handler(input, ctx) {
     const service = getUnhcrService();
     const resolved = await resolveScope(input, 'population', ctx);
+    // What both branches hand finishRows, so the nowcast is sorted, cut, and staged one way.
+    const finishFields = {
+      sourceTool: 'unhcr_get_population',
+      datasetLabel: 'population',
+      queryParams: { ...input },
+      sortBy: input.sort_by,
+      limit: input.limit,
+      stage: input.stage,
+      countFields: [...POPULATION_FIELDS, 'unrwa_refugees', 'idmc_conflict_idps'] as const,
+    };
 
     if (!resolved.ok) {
       const { failure } = resolved;
@@ -309,22 +342,37 @@ export const getPopulationTool = tool('unhcr_get_population', {
       if (afterCoverage && input.include_nowcast && failure.dimensions.origin.mode !== 'listed') {
         const nowcast = await service.nowcast(failure.dimensions.asylum, ctx);
         const period = nowcast.rows[0];
-        ctx.enrich.notice(
-          period
+        const { year_from: yearFrom, year_to: yearTo } = failure.window;
+        // No year-end rows exist here, so nothing is fetched for them; the scope echoes the requested window.
+        const finished = await finishRows<JoinedRow>(ctx, {
+          ...finishFields,
+          scope: {
+            ...failure.dimensions,
+            coverage: failure.coverage,
+            clamps: [],
+            query: {
+              origin: failure.dimensions.origin,
+              asylum: failure.dimensions.asylum,
+              yearFrom,
+              yearTo,
+            },
+            applied: appliedScope(failure.dimensions, yearFrom, yearTo),
+          },
+          rows: [],
+          fetchedRows: 0,
+          complete: true,
+          providers: [],
+          notices: [],
+          yearlessRows: 0,
+          emptyNotice: period
             ? `Year-end figures stop at ${failure.coverage.latestYear}, so no population rows fall in the requested window. The nowcast is UNHCR's ${snapshotLabel(period)} estimate of refugees and asylum-seekers by asylum country.`
             : `Year-end figures stop at ${failure.coverage.latestYear}, and UNHCR's nowcast has no row for this asylum scope.`,
-        );
+          nowcast: nowcast.rows,
+        });
         return {
-          rows: [],
-          total_rows: 0,
-          complete: true,
+          ...finished.output,
+          ...finished.nowcast,
           measure: 'stock' as const,
-          applied_scope: appliedScope(
-            failure.dimensions,
-            failure.window.year_from,
-            failure.window.year_to,
-          ),
-          latest_year: failure.coverage.latestYear,
           data_notes: dataNotes({
             companionOnlyRows: 0,
             nowcast,
@@ -332,10 +380,8 @@ export const getPopulationTool = tool('unhcr_get_population', {
             unexpectedValues: 0,
             yearlessRows: 0,
           }),
-          attribution: buildAttribution([]),
           footnotes: [],
           footnotes_total: 0,
-          nowcast: nowcast.rows,
         };
       }
 
@@ -368,8 +414,6 @@ export const getPopulationTool = tool('unhcr_get_population', {
     ];
     const yearlessRows = population.skippedRows + unrwa.skippedRows + idmc.skippedRows;
 
-    // UNHCR caveats describe UNHCR counts, so a companion-only row matches none.
-    const matched = matchFootnotes(footnotes, population.rows, typesWithCounts);
     const notices =
       input.include_nowcast && originListed
         ? [
@@ -377,24 +421,23 @@ export const getPopulationTool = tool('unhcr_get_population', {
           ]
         : [];
     const finished = await finishRows(ctx, {
-      sourceTool: 'unhcr_get_population',
-      datasetLabel: 'population',
-      queryParams: { ...input },
+      ...finishFields,
       scope,
       rows,
       fetchedRows: population.rows.length + unrwa.rows.length + idmc.rows.length + yearlessRows,
       complete: population.complete && unrwa.complete && idmc.complete,
-      sortBy: input.sort_by,
-      limit: input.limit,
-      stage: input.stage,
-      countFields: [...POPULATION_FIELDS, 'unrwa_refugees', 'idmc_conflict_idps'],
       providers,
       notices,
       yearlessRows,
+      nowcast: nowcast?.rows,
     });
+    // UNHCR caveats describe UNHCR counts: a companion-only row has every UNHCR
+    // count null, so it carries no type and matches none.
+    const matched = matchFootnotes(footnotes, finished.sorted, typesWithCounts, finished.limit);
 
     return {
-      ...finished,
+      ...finished.output,
+      ...finished.nowcast,
       measure: 'stock' as const,
       data_notes: dataNotes({
         companionOnlyRows,
@@ -406,7 +449,6 @@ export const getPopulationTool = tool('unhcr_get_population', {
       }),
       footnotes: matched.footnotes,
       footnotes_total: matched.total,
-      ...(nowcast && { nowcast: nowcast.rows }),
     };
   },
 
@@ -461,6 +503,17 @@ export const getPopulationTool = tool('unhcr_get_population', {
     if (result.nowcast) {
       lines.push(
         '### Nowcast',
+        `**Nowcast rows:** ${result.nowcast.length} shown of ${result.nowcast_total} total`,
+      );
+      const staged = result.nowcast_dataset;
+      if (staged) {
+        lines.push(
+          `**Nowcast dataset:** ${staged.name} (${staged.row_count} rows, expires ${staged.expires_at})`,
+        );
+        if (staged.evicted) lines.push(renderEvicted(staged.evicted));
+      }
+      lines.push(
+        '',
         result.nowcast.length > 0
           ? table(
               ['Asylum', 'Year', 'Month', 'Refugees', 'Asylum-seekers', 'Source'],

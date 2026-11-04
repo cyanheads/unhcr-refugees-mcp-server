@@ -46,8 +46,6 @@ export interface DataframeMeta {
   /** Third-party series the rows carry, for attribution downstream. */
   providers: Provider[];
   queryParams: Record<string, unknown>;
-  /** This table stores a lossless chunk snapshot rather than analytical rows. */
-  resultChunks?: boolean;
   rowCount: number;
   sourceTool: string;
   tableName: string;
@@ -83,14 +81,12 @@ export interface RegisterOptions {
 
 /** Input to {@link CanvasBridge.query}. */
 export interface BridgeQueryOptions {
-  preview?: number;
   registerAs?: string;
   rowLimit: number;
 }
 
 /** Result of {@link CanvasBridge.query}. */
 export interface BridgeQueryResult {
-  chunkSource?: DataframeMeta;
   complete: boolean;
   /** Dataframes the `registerAs` result evicted to keep the tenant within its staging budget. */
   evicted?: string[];
@@ -162,16 +158,16 @@ export function referencedDataframes(sql: string): string[] {
     for (const match of statement.matchAll(SQL_TOKENS)) {
       const token = match[0];
       if (token.startsWith('--') || token.startsWith('/*')) continue;
+      const identifier = token.startsWith('"') ? token.slice(1, -1).replaceAll('""', '"') : token;
       if (token.startsWith("'")) {
         if (previous === '(' && beforePrevious.toLowerCase() === 'query') {
           pending.push(token.slice(1, -1).replaceAll("''", "'"));
         }
-      } else {
-        const identifier = token.startsWith('"') ? token.slice(1, -1).replaceAll('""', '"') : token;
-        if (HANDLE_IN_SQL.test(identifier)) handles.add(`df_${identifier.slice(3).toUpperCase()}`);
+      } else if (HANDLE_IN_SQL.test(identifier)) {
+        handles.add(`df_${identifier.slice(3).toUpperCase()}`);
       }
       beforePrevious = previous;
-      previous = token.startsWith('"') ? token.slice(1, -1).replaceAll('""', '"') : token;
+      previous = identifier;
     }
   }
   return [...handles];
@@ -306,7 +302,6 @@ export class CanvasBridge {
     try {
       result = await instance.query(sql, {
         rowLimit: options.rowLimit,
-        ...(options.preview !== undefined && { preview: options.preview }),
         ...(options.registerAs !== undefined && {
           registerAs: options.registerAs,
           ttlMs: this.ttlMs,
@@ -327,9 +322,7 @@ export class CanvasBridge {
       ),
     ].sort();
     const provenance = { complete: incompleteSources.length === 0, incompleteSources };
-    const chunkSource = referenced.find((meta) => meta.resultChunks);
-    if (!options.registerAs || !result.tableName)
-      return { result, providers, ...provenance, ...(chunkSource && { chunkSource }) };
+    if (!options.registerAs || !result.tableName) return { result, providers, ...provenance };
 
     // On the registerAs path the provider counts the saved table, so rowCount is exact.
     if (result.rowCount > this.rowBudget) {
@@ -341,22 +334,6 @@ export class CanvasBridge {
           rowCount: result.rowCount,
           rowBudget: this.rowBudget,
           ...ctx.recoveryFor('register_as_too_large'),
-        },
-      );
-    }
-
-    const protectedChunks = referenced.filter((parent) => parent.resultChunks);
-    if (
-      result.rowCount + protectedChunks.reduce((sum, parent) => sum + parent.rowCount, 0) >
-      this.rowBudget
-    ) {
-      await this.dropTable(ctx, instance, result.tableName);
-      throw serviceUnavailable(
-        'The saved result and its source snapshots exceed the staging budget.',
-        {
-          reason: 'result_storage_unavailable',
-          retryable: false,
-          ...ctx.recoveryFor('result_storage_unavailable'),
         },
       );
     }
@@ -376,20 +353,8 @@ export class CanvasBridge {
       columnSchema: info?.columns ?? [],
     };
     await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
-    const evicted = await this.evictOverBudget(
-      ctx,
-      instance,
-      meta.tableName,
-      protectedChunks.map((parent) => parent.tableName),
-    );
-    return {
-      result,
-      meta,
-      providers,
-      ...provenance,
-      ...(chunkSource && { chunkSource }),
-      ...(evicted.length > 0 && { evicted }),
-    };
+    const evicted = await this.evictOverBudget(ctx, instance, meta.tableName);
+    return { result, meta, providers, ...provenance, ...(evicted.length > 0 && { evicted }) };
   }
 
   /** Idempotent drop of the table and its metadata; `true` when either existed. */
@@ -401,82 +366,6 @@ export class CanvasBridge {
     const instance = await this.acquireSharedCanvas(ctx);
     const dropped = await instance.drop(name);
     return dropped || hadMeta;
-  }
-
-  /** Retain a materialized JSON snapshot as independently decodable base64 byte chunks. */
-  async stageResultChunks(
-    ctx: Context,
-    snapshot: unknown,
-    provenance: { complete: boolean; incompleteSources: string[]; providers: Provider[] },
-    protect: string[] = [],
-  ): Promise<StagedDataset> {
-    const bytes = Buffer.from(JSON.stringify(snapshot), 'utf8');
-    const rows: Record<string, unknown>[] = [];
-    for (let offset = 0; offset < bytes.length; offset += 6144) {
-      rows.push({
-        chunk_index: rows.length,
-        chunk: bytes.subarray(offset, offset + 6144).toString('base64'),
-      });
-    }
-    const retained = await Promise.all(
-      protect.map((name) => ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`)),
-    );
-    if (
-      rows.length + retained.reduce((sum, meta) => sum + (meta?.rowCount ?? 0), 0) >
-      this.rowBudget
-    ) {
-      throw serviceUnavailable(
-        'The result snapshot and protected dataframes exceed the staging budget.',
-        {
-          reason: 'result_storage_unavailable',
-          retryable: false,
-          ...ctx.recoveryFor('result_storage_unavailable'),
-        },
-      );
-    }
-    const instance = await this.acquireSharedCanvas(ctx);
-    const tableName = this.mintName();
-    try {
-      const schema: ColumnSchema[] = [
-        { name: 'chunk_index', type: 'INTEGER' },
-        { name: 'chunk', type: 'VARCHAR' },
-      ];
-      await instance.registerTable(tableName, rows, {
-        schema,
-        ttlMs: this.ttlMs,
-        signal: ctx.signal,
-      });
-      const now = Date.now();
-      const meta: DataframeMeta = {
-        tableName,
-        sourceTool: 'unhcr_dataframe_query',
-        queryParams: { encoding: 'base64-json-utf8' },
-        createdAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + this.ttlMs).toISOString(),
-        rowCount: rows.length,
-        columnSchema: schema,
-        ...provenance,
-        resultChunks: true,
-      };
-      await ctx.state.set(`${META_PREFIX}${tableName}`, meta);
-      const evicted = await this.evictOverBudget(ctx, instance, tableName, protect);
-      return {
-        name: tableName,
-        row_count: rows.length,
-        expires_at: meta.expiresAt,
-        ...(evicted.length && { evicted }),
-      };
-    } catch (error) {
-      await this.dropTable(ctx, instance, tableName);
-      await ctx.state.delete(`${META_PREFIX}${tableName}`);
-      if (ctx.signal.aborted) throw error;
-      logger.warning('Result snapshot staging failed', withExtra(ctx, { error: errorText(error) }));
-      throw serviceUnavailable('The lossless result snapshot could not be retained.', {
-        reason: 'result_storage_unavailable',
-        retryable: false,
-        ...ctx.recoveryFor('result_storage_unavailable'),
-      });
-    }
   }
 
   /** Rebuild a gate or engine rejection with the declared reason and its recovery. */
@@ -518,7 +407,6 @@ export class CanvasBridge {
     ctx: Context,
     instance: CanvasInstance,
     keep: string,
-    protect: string[] = [],
   ): Promise<string[]> {
     const staged: { key: string; meta: DataframeMeta }[] = [];
     for await (const entry of this.iterateMeta(ctx)) staged.push(entry);
@@ -527,7 +415,7 @@ export class CanvasBridge {
     staged.sort((a, b) => a.meta.createdAt.localeCompare(b.meta.createdAt));
     for (const { key, meta } of staged) {
       if (total <= this.rowBudget) break;
-      if (meta.tableName === keep || protect.includes(meta.tableName)) continue;
+      if (meta.tableName === keep) continue;
       await this.dropTable(ctx, instance, meta.tableName);
       await ctx.state.delete(key);
       total -= meta.rowCount;

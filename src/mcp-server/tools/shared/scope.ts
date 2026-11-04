@@ -1,12 +1,14 @@
 /**
  * @fileoverview Scope resolution for the unhcr_get_* data tools: country
  * codes, expand, and the year window, validated in the order the design fixes.
- * Checks that need no upstream data run first (reversed window, expand
- * conflicts, the code cap), then codes are checked against the cached country
- * table, and only then is the dataset's coverage probed to fill, clamp, or
- * reject the window — so a caller mistake the server can detect never surfaces
- * as an upstream failure. Failures come back as values carrying a declared
- * contract reason, which the handler raises through `ctx.fail`.
+ * Checks that need no upstream data run first (the code cap, reversed window,
+ * expand conflicts), then codes are checked against the cached country table,
+ * and only then is the dataset's coverage probed to fill, clamp, or reject the
+ * window — so a caller mistake the server can detect never surfaces as an
+ * upstream failure. Failures come back as values carrying a declared contract
+ * reason, which the handler raises through `ctx.fail`; the one exception is the
+ * code cap, which `parseCodeList` throws with its declared reason,
+ * `too_many_country_codes`.
  * @module mcp-server/tools/shared/scope
  */
 

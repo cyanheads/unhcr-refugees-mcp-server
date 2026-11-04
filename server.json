@@ -57,6 +57,13 @@
           "default": "false"
         },
         {
+          "name": "UNHCR_CLAMP_LIMITS",
+          "description": "Serves limit, preview, and row_limit above their cap at the cap, with a notice. Set to false to advertise each cap as a schema maximum and reject a larger value.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -115,6 +122,13 @@
           "format": "boolean",
           "isRequired": false,
           "default": "false"
+        },
+        {
+          "name": "UNHCR_CLAMP_LIMITS",
+          "description": "Serves limit, preview, and row_limit above their cap at the cap, with a notice. Set to false to advertise each cap as a schema maximum and reject a larger value.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "MCP_HTTP_HOST",

@@ -12,8 +12,12 @@
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { Country } from './types.js';
 
-/** Most codes one `origin` / `asylum` filter may list. */
-export const MAX_COUNTRY_CODES = 50;
+/**
+ * Most distinct codes one `origin` / `asylum` filter may list: above the 229
+ * ISO3 codes UNHCR's table can be queried by, so every queryable country fits
+ * in one filter. UNHCR itself sets no limit on a code list.
+ */
+export const MAX_COUNTRY_CODES = 250;
 
 /** Lookup indexes over UNHCR's country table. */
 export interface CountryTable {
@@ -60,8 +64,11 @@ export function buildCountryTable(countries: readonly Country[]): CountryTable {
  * splits on commas, whitespace, square brackets, and quotes, none of which a
  * country code contains, so a list a client encoded into a string
  * (`'["DEU","AUT"]'`) yields its codes. Blank entries are ignored, so an empty
- * list means the dimension is unset. A string that splits into more codes than
- * the cap is rejected here, since the array form's cap is enforced by the schema.
+ * list means the dimension is unset.
+ *
+ * This is the one place the cap is counted, after de-duplication, for the
+ * string and the array form alike; the schema's own bounds sit above it. Past
+ * the cap it throws `too_many_country_codes`, a reason every data tool declares.
  */
 export function parseCodeList(value: string | string[] | undefined, field: string): string[] {
   if (value === undefined) return [];
@@ -71,13 +78,14 @@ export function parseCodeList(value: string | string[] | undefined, field: strin
   ];
   if (codes.length > MAX_COUNTRY_CODES) {
     throw validationError(
-      `${field} lists ${codes.length} country codes; the limit is ${MAX_COUNTRY_CODES}.`,
+      `${field} lists ${codes.length} distinct country codes; the limit is ${MAX_COUNTRY_CODES}.`,
       {
+        reason: 'too_many_country_codes',
         field,
         count: codes.length,
         max: MAX_COUNTRY_CODES,
         recovery: {
-          hint: `List at most ${MAX_COUNTRY_CODES} codes in ${field}, or leave ${field} empty and set expand to list every country.`,
+          hint: `List at most ${MAX_COUNTRY_CODES} distinct codes in ${field}, or leave ${field} empty and set expand to list every country.`,
         },
       },
     );

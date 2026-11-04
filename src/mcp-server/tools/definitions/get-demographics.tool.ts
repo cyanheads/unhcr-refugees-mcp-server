@@ -188,7 +188,7 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
     footnotes: z
       .array(footnoteSchema)
       .describe(
-        'UNHCR caveats matching rows of the full result, country-specific first; at most 20.',
+        'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
       ),
     footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
   }),
@@ -229,6 +229,15 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
         'Either list codes in origin/asylum or expand that dimension, not both; drop the codes to list every country.',
     },
     {
+      reason: 'too_many_country_codes',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      thrownBy: 'service',
+      when: 'origin or asylum lists more distinct codes than one filter accepts',
+      recovery:
+        'List fewer distinct codes in origin or asylum, or leave that filter empty and set expand to list every country.',
+    },
+    {
       reason: 'upstream_busy',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
@@ -262,8 +271,6 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
       .map(toOutputRow)
       .sort((a, b) => typeRank(a.population_type) - typeRank(b.population_type));
 
-    // Each row is one population type, so the filter narrows the footnotes with the rows.
-    const matched = matchFootnotes(footnotes, rows, (row) => withFolded(row.population_type));
     const filterEmptied = types.length > 0 && fetched.rows.length > 0 && rows.length === 0;
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_demographics',
@@ -291,9 +298,16 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
         : undefined,
       yearlessRows: fetched.skippedRows,
     });
+    // Each row is one population type, so the filter narrows the footnotes with the rows.
+    const matched = matchFootnotes(
+      footnotes,
+      finished.sorted,
+      (row) => withFolded(row.population_type),
+      finished.limit,
+    );
 
     return {
-      ...finished,
+      ...finished.output,
       measure: 'stock' as const,
       data_notes: dataNotes({
         unexpectedValues: fetched.unexpectedValues,

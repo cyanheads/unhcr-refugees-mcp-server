@@ -18,7 +18,7 @@ import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-que
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { carryDataframeState, flowContext, stagePopulation } from '../helpers/dataframes.js';
-import { errorOf, structuredOf, textOf } from '../helpers/results.js';
+import { errorOf, structuredOf, textOf, unescapeMarkdown } from '../helpers/results.js';
 import {
   createFailingCanvas,
   createTestCanvas,
@@ -111,7 +111,7 @@ describe('unhcr_dataframe_describe', () => {
     expect(dataframes[0]).toMatchObject({
       name: second,
       source_tool: 'unhcr_get_population',
-      query_params: { asylum: 'JOR', stage: true, limit: 100, expand: 'none', sort_by: 'year' },
+      query_params: { asylum: 'JOR', stage: true, limit: 25, expand: 'none', sort_by: 'year' },
       row_count: 3,
       complete: true,
       providers: ['UNRWA'],
@@ -300,9 +300,9 @@ describe('with listing off (HTTP without authentication, where every caller shar
         code: JsonRpcErrorCode.Forbidden,
         data: { reason: 'listing_unavailable', recovery: { hint: LISTING_RECOVERY } },
       });
-      const text = textOf(result.content);
+      const text = unescapeMarkdown(textOf(result.content));
       expect(text).toContain('reason listing_unavailable');
-      expect(text).toContain(LISTING_RECOVERY);
+      expect(text).toContain(`Recovery: ${LISTING_RECOVERY}`);
       expect(text).not.toMatch(/df_[A-Z0-9]{5}_[A-Z0-9]{5}/);
     }
   });

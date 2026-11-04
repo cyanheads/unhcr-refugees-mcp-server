@@ -7,14 +7,16 @@
  * teardown hooks that build and release the services, with dataframe listing
  * off for an unauthenticated HTTP deployment. The entry point reads
  * `.env` from the working directory, so every import runs from a temporary
- * directory the test controls.
+ * directory the test controls; the `.env` cases cover the dataframe default,
+ * the drop flag, `UNHCR_CLAMP_LIMITS`, and the canvas row cap reaching the
+ * tool schemas.
  * @module tests/index.test
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { createApp as CreateApp } from '@cyanheads/mcp-ts-core';
+import { type createApp as CreateApp, z } from '@cyanheads/mcp-ts-core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { ATTRIBUTION_SOURCE, DATA_LICENSE, DATASETS, TERMS_URL } from '@/services/unhcr/codes.js';
@@ -104,6 +106,17 @@ describe('createApp options', () => {
   it('turns dataframes on by default before the app is built', () => {
     expect(process.env.CANVAS_PROVIDER_TYPE).toBe('duckdb');
   });
+
+  it('serves the root skills/ tree, and every skill the instructions point to is in it', () => {
+    expect(options.skills).toBe('skills');
+    const pointed = [
+      ...(options.instructions ?? '').matchAll(/skill:\/\/([a-z0-9-]+)\/SKILL\.md/g),
+    ].map((match) => match[1]);
+    expect(pointed).toEqual(['unhcr-refugees-guide']);
+    for (const name of pointed) {
+      expect(existsSync(join(originalCwd, 'skills', name ?? '', 'SKILL.md')), name).toBe(true);
+    }
+  });
 });
 
 describe('server instructions', () => {
@@ -140,6 +153,14 @@ describe('server instructions', () => {
     expect(instructions()).toContain(TERMS_URL);
     expect(instructions()).toContain(DATA_LICENSE);
     expect(instructions()).toMatch(/not endorsed/);
+  });
+
+  it('gives the 25-row default and the clamp, and names no byte budget or result chunks', () => {
+    expect(instructions()).toContain(
+      'Inline rows default to 25 (limit, preview), and a count above its cap returns the cap with a notice.',
+    );
+    for (const term of ['result_chunks', 'byte', 'chunk_index', 'base64'])
+      expect(instructions(), term).not.toContain(term);
   });
 });
 
@@ -180,7 +201,12 @@ describe('lifecycle hooks', () => {
 });
 
 describe('.env in the working directory', () => {
-  const ENV_KEYS = ['CANVAS_PROVIDER_TYPE', 'UNHCR_DATAFRAME_DROP_ENABLED'] as const;
+  const ENV_KEYS = [
+    'CANVAS_PROVIDER_TYPE',
+    'CANVAS_DEFAULT_ROW_LIMIT',
+    'UNHCR_CLAMP_LIMITS',
+    'UNHCR_DATAFRAME_DROP_ENABLED',
+  ] as const;
   const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
   beforeEach(() => {
@@ -218,4 +244,46 @@ describe('.env in the working directory', () => {
     expect(drop).not.toBe(await liveDropTool());
     expect(process.env.CANVAS_PROVIDER_TYPE).toBe('duckdb');
   });
+
+  /** A loaded tool's count input as `tools/list` advertises it. */
+  const countInput = (loaded: AppOptions, toolName: string, field: string) => {
+    const tool = loaded.tools?.find((candidate) => candidate.name === toolName);
+    const schema = z.toJSONSchema(tool!.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    return schema.properties[field];
+  };
+
+  it('turns clamping off with UNHCR_CLAMP_LIMITS=false: every count input advertises its cap', async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '.env'), 'UNHCR_CLAMP_LIMITS=false\n');
+    const loaded = await importEntry(dir);
+    expect(countInput(loaded, 'unhcr_get_population', 'limit')).toMatchObject({ maximum: 2_000 });
+    expect(countInput(loaded, 'unhcr_dataframe_query', 'preview')).toMatchObject({
+      maximum: 1_500,
+    });
+    expect(countInput(loaded, 'unhcr_dataframe_query', 'row_limit')).toMatchObject({
+      maximum: 10_000,
+    });
+    expect(loaded.instructions).toContain('a count above its cap is rejected');
+  });
+
+  it('carries CANVAS_DEFAULT_ROW_LIMIT into the row_limit default', async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, '.env'), 'CANVAS_DEFAULT_ROW_LIMIT=500\n');
+    const loaded = await importEntry(dir);
+    const rowLimit = countInput(loaded, 'unhcr_dataframe_query', 'row_limit');
+    expect(rowLimit).toMatchObject({ default: 500 });
+    expect(rowLimit).not.toHaveProperty('maximum');
+  });
+
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: the unsubstituted install-template placeholder is the input under test
+  it.each(['${CANVAS_PROVIDER_TYPE}', '  '])(
+    'reads CANVAS_PROVIDER_TYPE=%j as unset and keeps dataframes on',
+    async (value) => {
+      process.env.CANVAS_PROVIDER_TYPE = value;
+      await importEntry(tempDir());
+      expect(process.env.CANVAS_PROVIDER_TYPE).toBe('duckdb');
+    },
+  );
 });

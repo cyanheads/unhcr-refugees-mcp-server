@@ -2,9 +2,9 @@
 
 **Server:** unhcr-refugees-mcp-server
 **Version:** 0.2.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -90,7 +90,7 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       when: "An origin or asylum value is not an ISO3 code in UNHCR's country list (after ISO2 normalization)",
       recovery: 'Find the country with unhcr_list_reference (topic countries, name_contains) and pass its ISO3 code.',
     },
-    // invalid_year_window, year_out_of_coverage, conflicting_scope, upstream_busy (thrownBy: 'service')
+    // invalid_year_window, year_out_of_coverage, conflicting_scope, too_many_country_codes, upstream_busy (thrownBy: 'service')
   ],
 
   async handler(input, ctx) {
@@ -109,7 +109,6 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       service.solutions(scope.query, ctx),
       service.footnotes(ctx),
     ]);
-    const matched = matchFootnotes(footnotes, solutions.rows, typesWithCounts);
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_solutions',
       datasetLabel: 'solutions',
@@ -126,9 +125,11 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       notices: [],
       yearlessRows: solutions.skippedRows,
     });
+    // Match after the cut: the cap keeps the caveats on the inline rows first.
+    const matched = matchFootnotes(footnotes, finished.sorted, typesWithCounts, finished.limit);
 
     return {
-      ...finished,
+      ...finished.output, // finished.limit is the effective (clamped) limit, kept out of the output
       measure: 'flow' as const,
       data_notes: dataNotes({ unexpectedValues: solutions.unexpectedValues, yearlessRows: solutions.skippedRows }),
       footnotes: matched.footnotes,
@@ -149,7 +150,9 @@ Every result carrying UNHCR figures returns `attribution` (the data tools and `u
 
 ### Resources and prompts
 
-None. Every dataset takes query parameters, and `unhcr_list_reference` serves the reference vocabulary. The `add-resource` and `add-prompt` skills carry the patterns if that changes.
+No resource or prompt definitions. Every dataset takes query parameters, and `unhcr_list_reference` serves the reference vocabulary. The `add-resource` and `add-prompt` skills carry the patterns if that changes.
+
+The one published agent skill, `skills/unhcr-refugees-guide/SKILL.md`, is served over MCP through `createApp({ skills: 'skills' })` as `skill://unhcr-refugees-guide/SKILL.md`, and the last sentence of `instructions` points to it. It carries gates verified against live data (which columns a total sums, stateless and Palestine refugee coding, the nowcast's missing origin, bloc totals in SQL, filters that drop countries, units, demographic shares, footnotes). When a tool's behavior changes, re-check the skill's claims against it; `framework-skills/add-skill/SKILL.md` has the format and limits.
 
 ### Server config
 
@@ -164,6 +167,7 @@ const ServerConfigSchema = z.object({
   cacheMaxMb: z.coerce.number().int().min(0).default(64).describe('…'),
   datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400).describe('…'),
   dataframeDropEnabled: z.stringbool().default(false).describe('…'),
+  clampLimits: z.stringbool().default(true).describe('…'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -176,12 +180,13 @@ export function getServerConfig(): ServerConfig {
     cacheMaxMb: 'UNHCR_CACHE_MAX_MB',
     datasetTtlSeconds: 'UNHCR_DATASET_TTL_SECONDS',
     dataframeDropEnabled: 'UNHCR_DATAFRAME_DROP_ENABLED',
+    clampLimits: 'UNHCR_CLAMP_LIMITS',
   });
   return _config;
 }
 ```
 
-Every variable is optional: the upstream is keyless. `src/index.ts` loads `.env` and sets `process.env.CANVAS_PROVIDER_TYPE ??= 'duckdb'` before `createApp()`, so dataframes are on unless an operator sets `none`. A new variable goes into `.env.example`, `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table.
+Every variable is optional: the upstream is keyless. `src/index.ts` loads `.env`, sets `process.env.CANVAS_PROVIDER_TYPE` to its `normalizeEnv` value or `duckdb` (a blank or an unsubstituted `${…}` placeholder reads as unset, as the framework parser reads it), and calls `resetConfig()`, all before `createApp()`, so dataframes are on unless an operator sets `none`. Tool modules evaluate before `.env` loads, so anything a schema depends on per deployment (`UNHCR_CLAMP_LIMITS`, the framework's `canvas.defaultRowLimit`) reaches the tools through `buildToolDefinitions()`, never a module-scope read; the module constants stay the default-mode definitions `lint:mcp` reads. A new variable goes into `.env.example`, `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table.
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`UNHCR_MAX_ROWS`) not the path (`maxRows`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
@@ -197,9 +202,14 @@ const config = getServerConfig();
 await createApp({
   name: 'unhcr-refugees-mcp-server',
   title: 'unhcr-refugees-mcp-server', // must match the unscoped package name — enforced by lint:packaging
-  tools: buildToolDefinitions({ dropEnabled: config.dataframeDropEnabled }),
+  tools: buildToolDefinitions({
+    clampLimits: config.clampLimits,
+    dropEnabled: config.dataframeDropEnabled,
+    rowLimitCap: frameworkConfig.canvas.defaultRowLimit,
+  }),
   resources: [],
   prompts: [],
+  skills: 'skills', // published agent skills, served as skill://<name>/SKILL.md
   instructions, // stocks vs flows, ISO3 origin/asylum, dataframes, null and rounding, attribution
   sessionMode: 'stateless',
   setup(core) {
@@ -210,7 +220,11 @@ await createApp({
         cacheMaxBytes: config.cacheMaxMb * 1024 * 1024,
       },
     });
-    initCanvasBridge(core.canvas, { ttlMs: config.datasetTtlSeconds * 1000 });
+    initCanvasBridge(core.canvas, {
+      ttlMs: config.datasetTtlSeconds * 1000,
+      // Unauthenticated HTTP callers share tenant `default`, so listing is off there.
+      listing: !(core.config.mcpTransportType === 'http' && core.config.mcpAuthMode === 'none'),
+    });
   },
   teardown() {
     disposeUnhcrService();
@@ -226,7 +240,7 @@ await createApp({
 
 `teardown()` disposes the UNHCR request pacer. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
 
-`buildToolDefinitions()` registers `unhcr_dataframe_drop` live only when `UNHCR_DATAFRAME_DROP_ENABLED=true`; otherwise it wraps the tool with `disabledTool()`, which keeps it out of `tools/list` while the HTTP landing page still shows it with the setting that turns it on.
+`buildToolDefinitions()` registers `unhcr_dataframe_drop` live only when `UNHCR_DATAFRAME_DROP_ENABLED=true`; otherwise it wraps the tool with `disabledTool()`, which keeps it out of `tools/list` while the HTTP landing page still shows it with the setting that turns it on. It also rebuilds the five data tools with `limitInput(clampLimits)` and builds the query tool with `defineDataframeQueryTool({ clamp, rowLimitCap })`. Every count input goes through `shared/counts.ts`: `countSchema()` advertises no `maximum` in clamp mode, and `clampCount()` serves an over-cap value at the cap with a notice, an info log line, and one `unhcr.count_input.clamped` increment.
 
 ---
 
@@ -297,7 +311,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point; loads .env, defaults CANVAS_PROVIDER_TYPE to duckdb
+  index.ts                              # createApp() entry point; loads .env, defaults CANVAS_PROVIDER_TYPE to duckdb, passes count settings
   config/
     server-config.ts                    # UNHCR_* env vars (Zod schema, lazy-parsed)
   services/
@@ -315,7 +329,7 @@ src/
   mcp-server/
     tools/
       definitions/
-        index.ts                        # buildToolDefinitions(); unhcr_dataframe_drop via disabledTool() unless enabled
+        index.ts                        # buildToolDefinitions(): count-input schemas per deployment; drop via disabledTool() unless enabled
         get-population.tool.ts          # unhcr_get_population
         get-demographics.tool.ts        # unhcr_get_demographics
         get-asylum-applications.tool.ts # unhcr_get_asylum_applications
@@ -326,10 +340,12 @@ src/
         dataframe-query.tool.ts         # unhcr_dataframe_query
         dataframe-drop.tool.ts          # unhcr_dataframe_drop (opt-in)
       shared/
-        inputs.ts                       # scopeInputs, resultInputs, blankAsUnset
+        inputs.ts                       # scopeInputs, resultInputs, limitInput, LIMIT_CAP, blankAsUnset
+        counts.ts                       # countSchema() + clampCount(): one cap per count input, notice, log line, counter
         outputs.ts                      # Shared output fields + markdown renderers (renderResultHeader, …)
         scope.ts                        # resolveScope(): country codes, expand, year window
-        results.ts                      # finishRows(): sort, cut to limit, stage overflow, enrichment notice
+        results.ts                      # finishRows(): sort, clamp and cut to limit, stage overflow, enrichment notice
+        query-output.ts                 # formatQueryOutput(): unhcr_dataframe_query content[], Markdown table or fenced JSON
         markdown.ts                     # cell / inline / blockquote for upstream text
 ```
 
@@ -350,9 +366,18 @@ No `resources/` or `prompts/` directories: the server registers neither.
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. Absent by default; usually none is needed |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -364,6 +389,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -411,7 +437,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, the published `skills/` tree (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -434,11 +460,13 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
 **README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
+
+**Dependency hold:** `@duckdb/node-api` stays on `^1.5.6-r.2`. Under DuckDB 2 the framework's canvas SQL gate refuses `SHOW <table>`, which 1.5.x answers ([cyanheads/mcp-ts-core#800](https://github.com/cyanheads/mcp-ts-core/issues/800)); move to `^2.0.0-r.1` once that ships. No `outdated.allowlist` entry is needed while `bun outdated`'s Update column equals Current.
 
 ---
 
@@ -504,7 +532,10 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] Every result carrying UNHCR figures returns `attribution`, with UNRWA or IDMC series credited in `providers`
 - [ ] A new env var lands on every surface: `server-config.ts`, `.env.example`, `server.json`, `manifest.json`, `.claude-plugin/plugin.json`, `.codex-plugin/mcp.json`, and the README configuration table
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `plugin.json` + `mcp.json` (Agent Plugins 1.0.0 — read by Codex, Cursor, GitHub Copilot, VS Code, Kiro) populated — `plugin.json` `name` = the unscoped repo name (lowercase `a-z`, `0-9`, `-`, `.` only); `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` from `package.json`; no other top-level field, `extensions` included. `mcp.json` holds one `"type": "stdio"` entry keyed by the unscoped name, `npx -y <full package name>`, and the same fixed `env` as `.codex-plugin/mcp.json`. Neither file carries a user-supplied variable (no `""`, no `${…}` besides `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`): keys reach Codex through `.codex-plugin/mcp.json` `env_vars`, which works only while `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
+- [ ] Any new root dev path has a root-anchored line in `.mcpbignore`; `bun run bundle` and `lint:packaging` pass
+- [ ] If the server publishes a skill in root `skills/`: `lint:packaging` passes, and `field-test` verified every gate and identifier claim in it against live tool behavior
 - [ ] `npm run devcheck` passes

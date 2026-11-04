@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/unhcr-refugees-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/unhcr-refugees-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/unhcr-refugees-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -49,21 +49,25 @@ Refugee and displacement statistics from the [UNHCR Refugee Data Finder](https:/
 
 ### Dataframe workflow
 
-1. A `unhcr_get_*` call whose full result exceeds `limit`, or that sets `stage: true`, stages every row as a `df_XXXXX_XXXXX` table and returns its handle in `dataset`.
-2. `unhcr_dataframe_describe` lists the staged tables with their columns, source call, and expiry. Listing is off over HTTP with `MCP_AUTH_MODE=none`, so there describe each table by the name in `dataset`.
+1. A `unhcr_get_*` call whose full result exceeds `limit`, or that sets `stage: true`, stages every row as a `df_XXXXX_XXXXX` table and returns its handle in `dataset` (`nowcast_dataset` for `unhcr_get_population`'s nowcast).
+2. `unhcr_dataframe_describe` lists the staged tables with their columns, source call, and expiry. Listing is off over HTTP with `MCP_AUTH_MODE=none`, so there describe each table by the name in `dataset` or `nowcast_dataset`.
 3. `unhcr_dataframe_query` runs one read-only DuckDB `SELECT` across them; `register_as` saves the result as a new table for the next query.
 4. Tables expire after `UNHCR_DATASET_TTL_SECONDS` (24 hours by default). With `UNHCR_DATAFRAME_DROP_ENABLED=true`, `unhcr_dataframe_drop` removes one sooner. Once a tenant's staged rows pass 1,000,000, the oldest tables are evicted first, and the call that pushed the total over names them in `evicted`.
 
 Dataframes run on DuckDB's native binding, which the npm and Docker installs carry. The Claude Desktop `.mcpb` bundle ships without it, so there the data tools answer inline only. Set `CANVAS_PROVIDER_TYPE=none` to turn dataframes off anywhere.
 
+### Agent skill
+
+[`skills/unhcr-refugees-guide`](skills/unhcr-refugees-guide/SKILL.md) is a published [Agent Skill](https://agentskills.io/specification). It covers the checks to make before summing or comparing UNHCR figures: which columns a total adds, stateless people under origin `XXA`, the two Palestine refugee series, the nowcast's missing origin, bureau and EU totals in SQL, filters that drop whole countries, units that switch between years, demographic shares, and footnotes. Plugin installs and the `.mcpb` bundle pick it up from the `skills/` folder, and MCP clients that support skills read it as `skill://unhcr-refugees-guide/SKILL.md`.
+
 ## Capability reference
 
 The five `unhcr_get_*` tools share one contract:
 
-- **Scope:** `origin` and `asylum` take ISO3 codes, case-insensitive, as a string or a list, up to 50 each. ISO2 codes are rewritten to ISO3; UNHCR's own codes and country names are rejected. Each listed code returns its own rows, and an omitted dimension is summed into one row unless `expand` (`origin`, `asylum`, or `both`) lists every country. `year_from` / `year_to` default to the dataset's span and are clamped to it.
-- **Rows:** the full result is sorted by `sort_by`, then cut to `limit` (default 100). Requests from 1 to 1,000,000 are accepted; values above 500 clamp to 500, with requested and effective limits disclosed even for an empty or small result. Where dataframes are on, the full set of a larger result is staged, and `stage: true` stages a result that fits too.
+- **Scope:** `origin` and `asylum` take ISO3 codes, case-insensitive, as a string or a list, up to 250 distinct codes each, enough to list every country. ISO2 codes are rewritten to ISO3; UNHCR's own codes and country names are rejected. Each listed code returns its own rows, and an omitted dimension is summed into one row unless `expand` (`origin`, `asylum`, or `both`) lists every country. `year_from` / `year_to` default to the dataset's span and are clamped to it.
+- **Rows:** the full result is sorted by `sort_by`, then cut to `limit` (default 25, cap 2,000). A larger `limit` is served at 2,000 with a notice naming the requested and effective values, even for an empty or small result; with `UNHCR_CLAMP_LIMITS=false` it is rejected instead. Where dataframes are on, the full set of a larger result is staged, and `stage: true` stages a result that fits too.
 - **Output:** `total_rows`, `complete` (false when `UNHCR_MAX_ROWS` stopped the fetch), `measure` (`stock` or `flow`), `applied_scope`, `latest_year`, `dataset` when staged, `data_notes`, and `attribution`.
-- **Errors:** `unknown_country_code`, `invalid_year_window`, `year_out_of_coverage`, `conflicting_scope`, and the retryable `upstream_busy`, which carries `retryAfter`.
+- **Errors:** `unknown_country_code`, `invalid_year_window`, `year_out_of_coverage`, `conflicting_scope`, `too_many_country_codes`, and the retryable `upstream_busy`, which carries `retryAfter`.
 
 ---
 
@@ -78,8 +82,8 @@ The five `unhcr_get_*` tools share one contract:
 ### `unhcr_get_population` <sub>tool</sub>
 
 - Year-end stocks `refugees`, `asylum_seekers`, `oip`, `idps`, `stateless`, `ooc`, and `hst`, plus `returned_refugees` and `returned_idps`, which are flows during the year; `sort_by` takes any of them or `year`
-- `unrwa_refugees` (Palestine refugees registered with UNRWA) and `idmc_conflict_idps` (IDMC's conflict-IDP estimate) sit beside a row when that series has one and are never added into UNHCR's counts. Matching UNHCR `footnotes` come back too, up to 20, with `footnotes_total`
-- `include_nowcast: true` appends UNHCR's current-year monthly estimate of refugees and asylum-seekers by asylum country; it is skipped when `origin` lists codes
+- `unrwa_refugees` (Palestine refugees registered with UNRWA) and `idmc_conflict_idps` (IDMC's conflict-IDP estimate) sit beside a row when that series has one and are never added into UNHCR's counts. Matching UNHCR `footnotes` come back too, up to 20, with `footnotes_total`; caveats on the inline rows come first
+- `include_nowcast: true` appends UNHCR's current-year monthly estimate of refugees and asylum-seekers by asylum country, sorted by `refugees` or `asylum_seekers` when `sort_by` names one, cut to `limit` with `nowcast_total`, and staged as its own dataframe (`nowcast_dataset`) when it overflows or `stage` is set; it is skipped when `origin` lists codes
 
 ---
 
@@ -123,18 +127,11 @@ The five `unhcr_get_*` tools share one contract:
 ### `unhcr_dataframe_query` <sub>tool</sub>
 
 - `sql` is one DuckDB `SELECT` of at most 20,000 characters; joins, aggregates, window functions, and CTEs work. Writes, DDL, `PRAGMA`, `ATTACH`, file references, external-data functions, engine introspection (`current_setting`, `current_schema`, `current_schemas`, `in_search_path`), dynamic table lookup (`query_table`), and system catalogs are rejected with a typed reason. `query()` accepts only a single SQL string literal, checked by the same gate
-- `row_limit` (1–10,000, default 1,000) caps the rows the query materializes, and `row_count_capped` flags a capped result. `preview` returns fewer rows inline; `register_as` saves the result under a new `df_XXXXX_XXXXX` name with a fresh TTL. It counts toward the 1,000,000-row staging budget, and a result that alone exceeds it fails `register_as_too_large`
+- `row_limit` caps the rows the query materializes, and `row_count_capped` flags a capped result. It defaults to 1,000, or to the canvas row cap (`CANVAS_DEFAULT_ROW_LIMIT`, 10,000 by default) when that is lower, and a larger value returns the canvas row cap with a notice naming requested and effective values. `register_as` saves the whole result under a new `df_XXXXX_XXXXX` name with a fresh TTL. It counts toward the 1,000,000-row staging budget, and a result that alone exceeds it fails `register_as_too_large`
+- `preview` sets the rows returned inline: default 25, at most 1,500 or `row_limit`, whichever is lower, with the same notice above the cap. `preview: 0` returns the columns and counts with no rows. With `UNHCR_CLAMP_LIMITS=false`, a `row_limit` above the canvas row cap or a `preview` above 1,500 fails validation instead
 - `SUM` and `COUNT` values come back as strings (BIGINT). `attribution` credits the third-party series of every table the SQL reads
-- `preview` accepts 0–1,000,000 and clamps to `row_limit`, disclosing requested and effective values. Zero still returns no preview rows. `complete` and `incomplete_sources` describe upstream coverage independently of display truncation: aggregates, joins and saved descendants remain partial if an original source was partial
-- The serialized tool result, including both response surfaces and notices, stays within 65,536 UTF-8 bytes. Whole rows or oversized metadata are withheld identically; values are never clipped. `result_chunks` identifies a tenant-scoped snapshot of the materialized columns, rows and result metadata. It has the usual TTL and shares the staging budget; `result_storage_unavailable` means that snapshot could not be retained. A saved `register_as` table remains available
-
-For a `result_chunks.name` such as `df_ABCDE_12345`, read one chunk per call:
-
-```sql
-SELECT chunk_index,chunk FROM df_ABCDE_12345 WHERE chunk_index=0
-```
-
-Increment the index through `result_chunks.chunk_count - 1`. Base64-decode each chunk separately (at most 6,144 source bytes), concatenate the decoded bytes in index order, then decode UTF-8 and parse JSON. A byte boundary may split a Unicode character, so decode UTF-8 only after joining the bytes. The snapshot contains rows materialized up to `row_limit`, including rows hidden by `preview`; `row_count_capped` still means additional matching rows were not materialized. For the full registered result, query `registered_as`. Small scalar results use Markdown tables; values needing exact whitespace, control characters, nested structures or Markdown syntax use fenced JSON.
+- `complete` and `incomplete_sources` describe upstream coverage independently of display truncation: aggregates, joins and saved descendants remain partial if an original source was partial
+- Every returned value is whole on both surfaces. Results with plain labels and cells use Markdown tables; values needing exact whitespace, control characters, nested structures or Markdown syntax use fenced JSON
 
 ---
 
@@ -160,117 +157,38 @@ Agent-friendly output:
 - Provenance on every data result: `applied_scope` echoes the codes, year window, and ISO2 rewrites actually sent, alongside `latest_year`, `measure`, `complete`, and `attribution`
 - Caveats as data: `data_notes` say how to read each result (stock or flow, rounding, what null means), and matching UNHCR `footnotes` arrive with `rows_matched`
 - Typed failures with recovery hints: `unknown_country_code` suggests the ISO3 for a UNHCR code, `year_out_of_coverage` names the dataset's span, `upstream_busy` carries `retryAfter`
-- Nothing trimmed silently: year clamps, empty-result hints, truncation, and where the full set was staged all arrive as a notice in the response
+- Nothing trimmed silently: year and limit clamps, empty-result hints, truncation, and where the full set was staged all arrive as a notice in the response
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://unhcr-refugees.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "unhcr-refugees-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://unhcr-refugees.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http unhcr-refugees-mcp-server https://unhcr-refugees.caseyjhand.com/mcp
 ```
 
 Every caller of the hosted instance shares one UNHCR request queue and one dataframe workspace, so `unhcr_dataframe_describe` takes a table's exact name there; listing is off.
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "unhcr-refugees-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/unhcr-refugees-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add unhcr-refugees-mcp-server -- npx -y @cyanheads/unhcr-refugees-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "unhcr-refugees-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/unhcr-refugees-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/unhcr-refugees-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "unhcr-refugees-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/unhcr-refugees-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key or account: UNHCR's API is keyless, and every variable below is optional.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/unhcr-refugees-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd unhcr-refugees-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# optional: every variable has a working default
-```
+UNHCR's API is keyless, so no key or account is needed, and every variable under [Configuration](#configuration) is optional. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -281,7 +199,9 @@ cp .env.example .env
 | `UNHCR_CACHE_MAX_MB` | Response-cache budget in MB; `0` disables it. Reference data (countries, regions, coverage, footnotes) has its own cache, always on. | `64` |
 | `UNHCR_DATASET_TTL_SECONDS` | Lifetime of a staged dataframe, in seconds (minimum 60). | `86400` |
 | `UNHCR_DATAFRAME_DROP_ENABLED` | Set `true` to register `unhcr_dataframe_drop`. | `false` |
+| `UNHCR_CLAMP_LIMITS` | Serves `limit`, `preview`, and `row_limit` above their cap at the cap, with a notice. Set `false` to advertise each cap as a schema `maximum` and reject a larger value. | `true` |
 | `CANVAS_PROVIDER_TYPE` | Dataframe engine: `duckdb`, or `none` to turn dataframes off. | `duckdb` |
+| `CANVAS_DEFAULT_ROW_LIMIT` | Most rows one `unhcr_dataframe_query` call materializes; the cap on `row_limit`, and its default when below 1,000. | `10000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
@@ -296,6 +216,16 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ## Running the server
 
 ### Local development
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/unhcr-refugees-mcp-server.git
+  cd unhcr-refugees-mcp-server && bun install
+  cp .env.example .env   # optional: every variable has a working default
+  ```
 
 - **Build and run the production version**:
 
@@ -316,6 +246,14 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
   bun run test:live  # Opt-in: re-checks the upstream behaviors the client relies on against api.unhcr.org
   ```
 
+### Docker
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/unhcr-refugees-mcp-server:latest
+```
+
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/unhcr-refugees-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/unhcr-refugees-mcp-server:latest"]`. To build locally, `docker build -t unhcr-refugees-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+
 ## Project structure
 
 | Directory | Purpose |
@@ -326,7 +264,8 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 | `src/mcp-server/tools/shared` | Scope inputs, output schemas, result shaping, and markdown rendering shared by the data tools. |
 | `src/services/unhcr` | UNHCR API client — request builder, paced fetch, response cache, reference data, normalization, asylum aggregation, footnote matching. |
 | `src/services/canvas-bridge` | Adapter to the framework DataCanvas — dataframe naming, provenance, expiry, and the read-only SQL gate. |
-| `tests/` | Unit tests mirroring the `src/` structure, plus the opt-in live suite in `tests/live/`. |
+| `skills/` | The published agent skill, served over MCP and shipped in every package. |
+| `tests/` | Unit tests mirroring the `src/` and `scripts/` structure, plus the opt-in live suite in `tests/live/`. |
 
 ## Development guide
 

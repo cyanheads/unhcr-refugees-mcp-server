@@ -5,7 +5,8 @@
  * ISO3, never by display name) equals that row's country. A footnote naming a
  * country never attaches to a row where that dimension is summed; one naming
  * no country attaches everywhere. Only footnotes matching at least one row are
- * returned.
+ * returned, ranked against the result's inline cut so the cap drops the
+ * caveats furthest from the rows shown.
  * @module services/unhcr/footnote-match
  */
 
@@ -127,73 +128,103 @@ export function typesWithCounts(row: object): string[] {
 const coverageKey = (origin: string | null, asylum: string | null): string =>
   `${origin ?? ''}|${asylum ?? ''}`;
 
-/** Each row's footnote types, per year, under each key a footnote can name. */
+/** One row as the index holds it: its position in the sorted result and its footnote types. */
+interface IndexedRow {
+  position: number;
+  types: readonly string[];
+}
+
+/**
+ * Each row's position and footnote types, per year, under each key a footnote
+ * can name. Rows are added in result order, so each list ascends by position.
+ */
 function indexRows<R extends FootnoteRowKey>(
   rows: readonly R[],
   typesOf: (row: R) => readonly string[],
-): Map<string, Map<number, (readonly string[])[]>> {
-  const index = new Map<string, Map<number, (readonly string[])[]>>();
-  const add = (key: string, year: number, types: readonly string[]) => {
+): Map<string, Map<number, IndexedRow[]>> {
+  const index = new Map<string, Map<number, IndexedRow[]>>();
+  const add = (key: string, year: number, entry: IndexedRow) => {
     let years = index.get(key);
     if (!years) {
       years = new Map();
       index.set(key, years);
     }
     const perYear = years.get(year);
-    if (perYear) perYear.push(types);
-    else years.set(year, [types]);
+    if (perYear) perYear.push(entry);
+    else years.set(year, [entry]);
   };
-  for (const row of rows) {
+  rows.forEach((row, position) => {
     const types = typesOf(row);
-    if (types.length === 0) continue;
-    add(coverageKey(null, null), row.year, types);
-    if (row.origin_iso3) add(coverageKey(row.origin_iso3, null), row.year, types);
-    if (row.asylum_iso3) add(coverageKey(null, row.asylum_iso3), row.year, types);
+    if (types.length === 0) return;
+    const entry = { position, types };
+    add(coverageKey(null, null), row.year, entry);
+    if (row.origin_iso3) add(coverageKey(row.origin_iso3, null), row.year, entry);
+    if (row.asylum_iso3) add(coverageKey(null, row.asylum_iso3), row.year, entry);
     if (row.origin_iso3 && row.asylum_iso3) {
-      add(coverageKey(row.origin_iso3, row.asylum_iso3), row.year, types);
+      add(coverageKey(row.origin_iso3, row.asylum_iso3), row.year, entry);
     }
-  }
+  });
   return index;
 }
 
 /**
- * Match footnotes to a full result. `typesOf` names the population types each
- * row carries; a footnote counts only rows carrying one of its types.
- * Country-specific footnotes come first, then the ones naming no country, each
- * group in UNHCR's order; the list is capped at {@link FOOTNOTE_CAP} and
- * `total` counts every match.
+ * Match footnotes to a full result in its sorted order, whose first `inline`
+ * rows are the ones shown inline (the effective `limit`). `typesOf` names the
+ * population types each row carries; a footnote counts only rows carrying one
+ * of its types. The list is ranked so the cap at {@link FOOTNOTE_CAP} drops
+ * the caveats furthest from the inline rows: those matching an inline row come
+ * before those matching only rows past the cut; within each group,
+ * country-specific before naming no country, then by the first row matched,
+ * then UNHCR's order. `total` and each `rows_matched` count the full result.
  */
 export function matchFootnotes<R extends FootnoteRowKey>(
   footnotes: readonly Footnote[],
   rows: readonly R[],
   typesOf: (row: R) => readonly string[],
+  inline: number,
 ): { footnotes: MatchedFootnote[]; total: number } {
   if (rows.length === 0) return { footnotes: [], total: 0 };
   const index = indexRows(rows, typesOf);
-  const specific: MatchedFootnote[] = [];
-  const general: MatchedFootnote[] = [];
+  const ranked: { entry: MatchedFootnote; first: number; general: boolean }[] = [];
 
   for (const note of footnotes) {
     const years = index.get(coverageKey(note.originIso3, note.asylumIso3));
     if (!years) continue;
     const noteTypes = new Set(note.populationTypes);
     let matched = 0;
-    for (const [year, rowTypes] of years) {
+    let first = Number.POSITIVE_INFINITY;
+    for (const [year, entries] of years) {
       if (!note.ranges.some(([from, to]) => year >= from && year <= to)) continue;
-      for (const types of rowTypes) if (types.some((type) => noteTypes.has(type))) matched++;
+      for (const { position, types } of entries) {
+        if (!types.some((type) => noteTypes.has(type))) continue;
+        matched++;
+        first = Math.min(first, position);
+      }
     }
     if (matched === 0) continue;
-    const entry: MatchedFootnote = {
-      text: note.text,
-      years: note.years,
-      origin_iso3: note.originIso3,
-      asylum_iso3: note.asylumIso3,
-      population_types: note.populationTypes,
-      rows_matched: matched,
-    };
-    (note.originIso3 || note.asylumIso3 ? specific : general).push(entry);
+    ranked.push({
+      entry: {
+        text: note.text,
+        years: note.years,
+        origin_iso3: note.originIso3,
+        asylum_iso3: note.asylumIso3,
+        population_types: note.populationTypes,
+        rows_matched: matched,
+      },
+      first,
+      general: !note.originIso3 && !note.asylumIso3,
+    });
   }
 
-  const all = [...specific, ...general];
-  return { footnotes: all.slice(0, FOOTNOTE_CAP), total: all.length };
+  // Array#sort is stable, so ties keep UNHCR's order.
+  ranked.sort(
+    (a, b) =>
+      Number(a.first >= inline) - Number(b.first >= inline) ||
+      Number(a.general) - Number(b.general) ||
+      a.first - b.first,
+  );
+  return {
+    footnotes: ranked.slice(0, FOOTNOTE_CAP).map(({ entry }) => entry),
+    total: ranked.length,
+  };
 }

@@ -12,7 +12,6 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import {
   buildCountryTable,
   type CountryTable,
-  MAX_COUNTRY_CODES,
   parseCodeList,
   resolveCountryCodes,
 } from '@/services/unhcr/country-input.js';
@@ -20,6 +19,16 @@ import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { initFakeUpstream } from '../../helpers/services.js';
 
 let table: CountryTable;
+
+/** The value `run` throws, failing the test when it returns instead. */
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected a throw');
+}
 
 beforeAll(async () => {
   // The table is built exactly as production builds it: from recorded /countries/ rows.
@@ -76,31 +85,30 @@ describe('parseCodeList', () => {
     expect(parseCodeList(['', '  '], 'origin')).toEqual([]);
   });
 
-  it('accepts exactly the cap and rejects a string that splits past it, pointing at expand', () => {
-    const codes = Array.from(
-      { length: MAX_COUNTRY_CODES + 1 },
-      (_, i) => `C${String(i).padStart(2, '0')}`,
-    );
-    expect(parseCodeList(codes.slice(0, MAX_COUNTRY_CODES).join(','), 'asylum')).toHaveLength(
-      MAX_COUNTRY_CODES,
-    );
-    let thrown: unknown;
-    try {
-      parseCodeList(codes.join(','), 'asylum');
-    } catch (error) {
-      thrown = error;
+  it('accepts 250 distinct codes and fails 251 with too_many_country_codes, alike as a string and a list', () => {
+    const codes = Array.from({ length: 251 }, (_, i) => `C${String(i).padStart(3, '0')}`);
+    expect(parseCodeList(codes.slice(0, 250).join(','), 'asylum')).toHaveLength(250);
+    expect(parseCodeList(codes.slice(0, 250), 'asylum')).toHaveLength(250);
+    for (const value of [codes.join(','), codes.join(', '), codes]) {
+      expect(thrownBy(() => parseCodeList(value, 'asylum'))).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message: 'asylum lists 251 distinct country codes; the limit is 250.',
+        data: {
+          reason: 'too_many_country_codes',
+          field: 'asylum',
+          count: 251,
+          max: 250,
+          recovery: {
+            hint: 'List at most 250 distinct codes in asylum, or leave asylum empty and set expand to list every country.',
+          },
+        },
+      });
     }
-    expect(thrown).toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: { field: 'asylum', count: MAX_COUNTRY_CODES + 1, max: MAX_COUNTRY_CODES },
-    });
-    expect((thrown as { data: { recovery: { hint: string } } }).data.recovery.hint).toContain(
-      'expand',
-    );
   });
 
-  it('counts codes after de-duplication, so repeats never trip the cap', () => {
-    const repeated = Array.from({ length: MAX_COUNTRY_CODES + 10 }, () => 'SYR').join(',');
+  it('counts codes after de-duplication in both forms, so repeats never trip the cap', () => {
+    const repeated = Array.from({ length: 251 }, () => 'syr');
+    expect(parseCodeList(repeated.join(','), 'origin')).toEqual(['SYR']);
     expect(parseCodeList(repeated, 'origin')).toEqual(['SYR']);
   });
 
@@ -114,14 +122,65 @@ describe('parseCodeList', () => {
   });
 
   it('applies the cap to a list encoded into a string', () => {
-    const codes = Array.from(
-      { length: MAX_COUNTRY_CODES + 1 },
-      (_, i) => `C${String(i).padStart(2, '0')}`,
-    );
-    expect(parseCodeList(JSON.stringify(codes.slice(1)), 'asylum')).toHaveLength(MAX_COUNTRY_CODES);
+    const codes = Array.from({ length: 251 }, (_, i) => `C${String(i).padStart(3, '0')}`);
+    expect(parseCodeList(JSON.stringify(codes.slice(1)), 'asylum')).toHaveLength(250);
     expect(() => parseCodeList(JSON.stringify(codes), 'asylum')).toThrow(
-      `asylum lists ${MAX_COUNTRY_CODES + 1} country codes; the limit is ${MAX_COUNTRY_CODES}.`,
+      'asylum lists 251 distinct country codes; the limit is 250.',
     );
+  });
+});
+
+/**
+ * The split runs over caller text, so its CPU cost is held linear against the
+ * shapes that break a scanner: a long separator run, an opener repeated with
+ * no closer, many tiny tokens, one unbroken token, and many distinct codes for
+ * the de-duplication set. Thread CPU time, the least of several runs per size,
+ * doubling from 5k to 320k characters; at every step the cost may grow at most
+ * 4× faster than the input, so the full 64× span stays under 256×.
+ */
+describe('parseCodeList CPU cost', () => {
+  const SIZES = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000];
+
+  /** The four-letter code numbered `n`, base 26 (AAAA, AAAB, …). */
+  const codeAt = (n: number) =>
+    Array.from({ length: 4 }, (_, i) =>
+      String.fromCharCode(65 + (Math.floor(n / 26 ** (3 - i)) % 26)),
+    ).join('');
+
+  /** Least thread CPU time, in µs, of seven parses of `input`. */
+  function cpuMicros(input: string): number {
+    let least = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 7; run++) {
+      const start = process.threadCpuUsage();
+      try {
+        parseCodeList(input, 'origin');
+      } catch {
+        // Past the cap: the split and de-duplication have already run.
+      }
+      const { user, system } = process.threadCpuUsage(start);
+      least = Math.min(least, user + system);
+    }
+    return least;
+  }
+
+  it.each([
+    ['a separator run', (size: number) => ' ,["\''.repeat(size / 5)],
+    ['an opener repeated with no closer', (size: number) => `${'['.repeat(size - 3)}SYR`],
+    ['many tiny tokens', (size: number) => 'SY, '.repeat(size / 4)],
+    ['one unbroken token', (size: number) => 'A'.repeat(size)],
+    [
+      'many distinct codes',
+      (size: number) =>
+        Array.from({ length: size / 5 }, (_, i) => codeAt(i))
+          .join(',')
+          .padEnd(size, ','),
+    ],
+  ])('splits %s in linear time from 5k to 320k characters', (_shape, build) => {
+    const base = cpuMicros(build(SIZES[0] as number));
+    for (const size of SIZES.slice(1)) {
+      const growth = (size / (SIZES[0] as number)) * 4;
+      expect(cpuMicros(build(size)) / base, `${size} characters`).toBeLessThan(growth);
+    }
   });
 });
 

@@ -9,11 +9,16 @@
 import type { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getSolutionsTool } from '@/mcp-server/tools/definitions/get-solutions.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { footnoteRow, SOLUTIONS_ROWS, solutionsRow } from '../fixtures/unhcr.js';
 import type { FakeUnhcr } from '../helpers/fake-unhcr.js';
 import { errorOf, structuredOf, textOf } from '../helpers/results.js';
 import { createTestCanvas, initFakeUpstream, shutdownCanvas } from '../helpers/services.js';
@@ -48,16 +53,13 @@ const call = (input: Input, ctx = context()) =>
 const syrPairs2025: Input = { origin: 'SYR', expand: 'asylum', year_from: 2025, year_to: 2025 };
 
 describe('success, both surfaces', () => {
-  it.each([501, 1_000_000])(
-    'discloses a clamped display request of %s on both surfaces',
-    async (limit) => {
-      const result = await runToolContract(getSolutionsTool, { origin: 'SYR', limit });
-      const structured = structuredOf(result);
-      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
-      expect(textOf(result.content)).toContain(String(structured.notice));
-      expect(structured).not.toHaveProperty('truncated');
-    },
-  );
+  it.each([2_001])('discloses a clamped display request of %s on both surfaces', async (limit) => {
+    const result = await runToolContract(getSolutionsTool, { origin: 'SYR', limit });
+    const structured = structuredOf(result);
+    expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 2000.`);
+    expect(textOf(result.content)).toContain(String(structured.notice));
+    expect(structured).not.toHaveProperty('truncated');
+  });
   it('returns an under-cap page of flows through the production enrichment parse', async () => {
     const result = await runToolContract(getSolutionsTool, { origin: 'SYR' });
     const structured = structuredOf(result);
@@ -223,6 +225,73 @@ describe('success, both surfaces', () => {
       '- **2024 - 2025** · origin SYR, any asylum · types RET, RDP · 4 rows matched',
     );
   });
+
+  it('keeps the inline row’s caveat ahead of the cap that caveats past the cut would fill, on both surfaces', async () => {
+    const returnsNote = (asylum: string, footnote: string) =>
+      footnoteRow({ footnote, year: '2025', coo: null, coa: asylum, population_type: 'RET' });
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        // Illustrative: 21 caveats on Lebanon's row, listed ahead of one on Türkiye's.
+        footnotes: [
+          ...Array.from({ length: 21 }, (_, i) => returnsNote('LBN', `Lebanon caveat ${i}.`)),
+          returnsNote('TUR', 'Türkiye caveat.'),
+        ],
+      },
+    }));
+    // Sorted by returned_refugees, Türkiye's row is first and the only one inline.
+    const result = await runToolContract(getSolutionsTool, {
+      ...syrPairs2025,
+      sort_by: 'returned_refugees',
+      limit: 1,
+    });
+    const structured = structuredOf(result);
+    expect((structured.rows as { asylum_iso3: string }[]).map((row) => row.asylum_iso3)).toEqual([
+      'TUR',
+    ]);
+    expect(structured.footnotes_total).toBe(22);
+    expect((structured.footnotes as { text: string }[]).map((note) => note.text)).toEqual([
+      'Türkiye caveat.',
+      ...Array.from({ length: 19 }, (_, i) => `Lebanon caveat ${i}.`),
+    ]);
+    const text = textOf(result.content);
+    expect(text).toContain('### Footnotes (20 of 22)');
+    expect(text).toContain('> Türkiye caveat.');
+    expect(text).not.toContain('Lebanon caveat 19.');
+  });
+
+  it('cuts the footnote groups at the effective limit after the clamp, logging the clamp under this tool’s name', async () => {
+    const returnsNote = (asylum: string | null, footnote: string) =>
+      footnoteRow({ footnote, year: '2025', coo: null, coa: asylum, population_type: 'RET' });
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        solutions: [
+          ...SOLUTIONS_ROWS.filter((row) => row.coo_iso === '-' && row.coa_iso === '-'),
+          ...Array.from({ length: 2_000 }, (_, i) =>
+            solutionsRow(2025, 'SYR', 'DEU', [10_000 + i, '-', '-', '-']),
+          ),
+          solutionsRow(2025, 'SYR', 'TUR', [1, '-', '-', '-']),
+        ],
+        footnotes: [returnsNote('TUR', 'Türkiye caveat.'), returnsNote(null, 'Global caveat.')],
+      },
+    }));
+    const ctx = context();
+    const result = await call({ ...syrPairs2025, sort_by: 'returned_refugees', limit: 2_001 }, ctx);
+    // Türkiye's row sorts last, at position 2,000: past the effective cut of 2,000, so its
+    // country-specific caveat follows the general one every inline row carries.
+    expect(result.rows).toHaveLength(2_000);
+    expect(result.footnotes.map((note) => note.text)).toEqual([
+      'Global caveat.',
+      'Türkiye caveat.',
+    ]);
+    const clampLines = (ctx.log as MockContextLogger).calls.filter(
+      (line) => line.msg === 'Count input clamped',
+    );
+    expect(clampLines.map((line) => line.data)).toEqual([
+      { tool: 'unhcr_get_solutions', field: 'limit', requested: 2_001, effective: 2_000 },
+    ]);
+  });
 });
 
 describe('inputs and sorting', () => {
@@ -257,7 +326,7 @@ describe('inputs and sorting', () => {
   it.each([
     ['a population-only sort field', { sort_by: 'refugees' as 'year' }],
     ['year_from below 1900', { year_from: 1800 }],
-    ['limit above hard ceiling', { limit: 1_000_001 }],
+    ['a fractional limit', { limit: 1.5 }],
   ])('rejects %s as invalid params', async (_label, input) => {
     expect(errorOf(await runToolContract(getSolutionsTool, input as Input)).code).toBe(
       JsonRpcErrorCode.InvalidParams,

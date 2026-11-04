@@ -13,7 +13,12 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getDemographicsTool } from '@/mcp-server/tools/definitions/get-demographics.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -79,16 +84,13 @@ const bandsOf = (row: Row) => BAND_FIELDS.map((field) => row[field]);
 const syr2025: Input = { origin: 'SYR', year_from: 2025 };
 
 describe('success, both surfaces', () => {
-  it.each([501, 1_000_000])(
-    'discloses a clamped display request of %s on both surfaces',
-    async (limit) => {
-      const result = await runToolContract(getDemographicsTool, { origin: 'SYR', limit });
-      const structured = structuredOf(result);
-      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
-      expect(textOf(result.content)).toContain(String(structured.notice));
-      expect(structured).not.toHaveProperty('truncated');
-    },
-  );
+  it.each([2_001])('discloses a clamped display request of %s on both surfaces', async (limit) => {
+    const result = await runToolContract(getDemographicsTool, { origin: 'SYR', limit });
+    const structured = structuredOf(result);
+    expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 2000.`);
+    expect(textOf(result.content)).toContain(String(structured.notice));
+    expect(structured).not.toHaveProperty('truncated');
+  });
   it('returns an under-cap page through the production enrichment parse', async () => {
     const result = await runToolContract(getDemographicsTool, { origin: 'SYR', asylum: 'DEU' });
     const structured = structuredOf(result);
@@ -475,6 +477,71 @@ describe('population_types and footnotes', () => {
     expect(text).not.toContain('stateless persons have been naturalized');
   });
 
+  it('keeps the inline row’s caveat ahead of the cap that caveats past the cut would fill, on both surfaces', async () => {
+    const syriaNote = (type: string, footnote: string) =>
+      footnoteRow({ footnote, year: '2025', coo: null, coa: 'SYR', population_type: type });
+    upstream({
+      // Illustrative: 21 IDP caveats, listed ahead of one host-community caveat.
+      footnotes: [
+        ...Array.from({ length: 21 }, (_, i) => syriaNote('IDP', `IDP caveat ${i}.`)),
+        syriaNote('HST', 'Host-community caveat.'),
+      ],
+    });
+    // SYR→SYR 2025 sorted by total: the HST row is first and the only one inline,
+    // although the type order the rows arrive in puts IDP first.
+    const result = await runToolContract(getDemographicsTool, {
+      origin: 'SYR',
+      asylum: 'SYR',
+      year_from: 2025,
+      sort_by: 'total',
+      limit: 1,
+    });
+    const structured = structuredOf(result);
+    expect((structured.rows as Row[]).map((row) => row.population_type)).toEqual(['HST']);
+    expect(structured.footnotes_total).toBe(22);
+    expect((structured.footnotes as { text: string }[]).map((note) => note.text)).toEqual([
+      'Host-community caveat.',
+      ...Array.from({ length: 19 }, (_, i) => `IDP caveat ${i}.`),
+    ]);
+    const text = textOf(result.content);
+    expect(text).toContain('### Footnotes (20 of 22)');
+    expect(text).toContain('> Host-community caveat.');
+    expect(text).not.toContain('IDP caveat 19.');
+  });
+
+  it('cuts the footnote groups at the effective limit after the clamp, logging the clamp under this tool’s name', async () => {
+    const refugeeNote = (asylum: string | null, footnote: string) =>
+      footnoteRow({ footnote, year: '2025', coo: null, coa: asylum, population_type: 'REF' });
+    upstream({
+      demographics: [
+        ...DEMOGRAPHICS_ROWS.filter((raw) => raw.coo_iso === '-' && raw.coa_iso === '-'),
+        ...Array.from({ length: 2_000 }, (_, i) =>
+          demographicsRow(2025, 'SYR', 'DEU', 'REF', 10_000 + i, NO_BREAKDOWN),
+        ),
+        demographicsRow(2025, 'SYR', 'TUR', 'REF', 1, NO_BREAKDOWN),
+      ],
+      footnotes: [refugeeNote('TUR', 'Türkiye caveat.'), refugeeNote(null, 'Global caveat.')],
+    });
+    const ctx = context();
+    const result = await call(
+      { origin: 'SYR', expand: 'asylum', year_from: 2025, sort_by: 'total', limit: 2_001 },
+      ctx,
+    );
+    // Türkiye's row sorts last, at position 2,000: past the effective cut of 2,000, so its
+    // country-specific caveat follows the general one every inline row carries.
+    expect(result.rows).toHaveLength(2_000);
+    expect(result.footnotes.map((note) => note.text)).toEqual([
+      'Global caveat.',
+      'Türkiye caveat.',
+    ]);
+    const clampLines = (ctx.log as MockContextLogger).calls.filter(
+      (line) => line.msg === 'Count input clamped',
+    );
+    expect(clampLines.map((line) => line.data)).toEqual([
+      { tool: 'unhcr_get_demographics', field: 'limit', requested: 2_001, effective: 2_000 },
+    ]);
+  });
+
   it('treats blank and empty filters as unset', async () => {
     for (const population_types of ['', '  ', []] as unknown as Input['population_types'][]) {
       const result = await call({ ...syr2025, population_types });
@@ -648,10 +715,11 @@ describe('declared errors, by reason', () => {
 });
 
 describe('declared surface', () => {
-  it('declares the five shared reasons, upstream_busy retryable, and read-only open-world annotations', () => {
+  it('declares the six shared reasons, upstream_busy retryable, and read-only open-world annotations', () => {
     expect(getDemographicsTool.errors?.map((entry) => entry.reason).sort()).toEqual([
       'conflicting_scope',
       'invalid_year_window',
+      'too_many_country_codes',
       'unknown_country_code',
       'upstream_busy',
       'year_out_of_coverage',

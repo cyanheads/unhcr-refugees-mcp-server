@@ -83,7 +83,7 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
     footnotes: z
       .array(footnoteSchema)
       .describe(
-        'UNHCR caveats matching rows of the full result, country-specific first; at most 20.',
+        'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
       ),
     footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
   }),
@@ -124,6 +124,15 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
         'Either list codes in origin/asylum or expand that dimension, not both; drop the codes to list every country.',
     },
     {
+      reason: 'too_many_country_codes',
+      code: JsonRpcErrorCode.ValidationError,
+      severity: 'notice',
+      thrownBy: 'service',
+      when: 'origin or asylum lists more distinct codes than one filter accepts',
+      recovery:
+        'List fewer distinct codes in origin or asylum, or leave that filter empty and set expand to list every country.',
+    },
+    {
       reason: 'upstream_busy',
       code: JsonRpcErrorCode.RateLimited,
       retryable: true,
@@ -150,7 +159,6 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       service.solutions(scope.query, ctx),
       service.footnotes(ctx),
     ]);
-    const matched = matchFootnotes(footnotes, solutions.rows, typesWithCounts);
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_solutions',
       datasetLabel: 'solutions',
@@ -167,9 +175,10 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       notices: [],
       yearlessRows: solutions.skippedRows,
     });
+    const matched = matchFootnotes(footnotes, finished.sorted, typesWithCounts, finished.limit);
 
     return {
-      ...finished,
+      ...finished.output,
       measure: 'flow' as const,
       data_notes: dataNotes({
         unexpectedValues: solutions.unexpectedValues,

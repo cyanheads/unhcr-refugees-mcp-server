@@ -3,13 +3,14 @@
  * recorded-shape `/footnotes/` rows: year specs (single, range, list), blank
  * country columns, per-row population-type overlap (each row carries its own
  * types, with the folded ones and only the nonzero count columns), the
- * summed-dimension rule, the country-specific-first order, and the cap.
+ * summed-dimension rule, the ranking against the inline cut, and the cap.
  * @module tests/services/unhcr/footnote-match.test
  */
 
 import { describe, expect, it } from 'vitest';
 import {
   FOOTNOTE_CAP,
+  type Footnote,
   type FootnoteRowKey,
   footnoteSpan,
   matchFootnotes,
@@ -35,6 +36,10 @@ const row = (
 ): TypedRow => ({ year, origin_iso3: origin, asylum_iso3: asylum, types });
 
 const typesOf = (typed: TypedRow) => typed.types;
+
+/** Match against rows in their sorted order, the first `inline` of them shown inline (all, unless a test cuts). */
+const match = (parsed: readonly Footnote[], rows: readonly TypedRow[], inline = rows.length) =>
+  matchFootnotes(parsed, rows, typesOf, inline);
 
 const note = (spec: Partial<RawRow>): RawRow => ({
   footnote: 'A caveat.',
@@ -189,7 +194,7 @@ describe('typesWithCounts', () => {
 describe('matchFootnotes', () => {
   it('attaches an asylum-named note to rows in that asylum country, whatever the origin', () => {
     const rows = [row(2025, 'SYR', 'DEU'), row(2025, null, 'DEU'), row(2024, 'SYR', 'DEU')];
-    const { footnotes: matched, total } = matchFootnotes(footnotes, rows, typesOf);
+    const { footnotes: matched, total } = match(footnotes, rows);
     expect(total).toBe(1);
     expect(matched).toEqual([
       {
@@ -204,24 +209,20 @@ describe('matchFootnotes', () => {
   });
 
   it('never attaches a country-named note to a row where that dimension is summed', () => {
-    const { total } = matchFootnotes(
-      footnotes,
-      [row(2025, 'SYR', null), row(2025, null, null)],
-      typesOf,
-    );
+    const { total } = match(footnotes, [row(2025, 'SYR', null), row(2025, null, null)]);
     expect(total).toBe(0);
   });
 
   it('requires both named countries to match a pair note', () => {
     const notes = [note({ coo_iso: 'SYR', coa_iso: 'TUR', year: '2017 - 2018' })].map(toFootnote);
-    expect(matchFootnotes(notes, [row(2017, 'SYR', 'TUR')], typesOf).total).toBe(1);
-    expect(matchFootnotes(notes, [row(2017, 'SYR', 'DEU')], typesOf).total).toBe(0);
-    expect(matchFootnotes(notes, [row(2017, 'SYR', null)], typesOf).total).toBe(0);
+    expect(match(notes, [row(2017, 'SYR', 'TUR')]).total).toBe(1);
+    expect(match(notes, [row(2017, 'SYR', 'DEU')]).total).toBe(0);
+    expect(match(notes, [row(2017, 'SYR', null)]).total).toBe(0);
   });
 
   it('attaches a note naming no country everywhere its years and types allow', () => {
     const rows = [row(2020, 'SYR', 'DEU'), row(2021, null, null), row(2023, 'AFG', null)];
-    const { footnotes: matched } = matchFootnotes(footnotes, rows, typesOf);
+    const { footnotes: matched } = match(footnotes, rows);
     expect(matched).toEqual([
       expect.objectContaining({ years: '2019 - 2022', origin_iso3: null, rows_matched: 2 }),
     ]);
@@ -229,10 +230,8 @@ describe('matchFootnotes', () => {
 
   it('matches a year inside any range of a year list and not in the gaps', () => {
     const psE = [row(2019, 'PSE', null)];
-    expect(matchFootnotes(footnotes, psE, typesOf).footnotes.map((m) => m.years)).toEqual([
-      '2019 - 2022',
-    ]);
-    const inRange = matchFootnotes(footnotes, [row(2024, 'PSE', 'JOR')], typesOf);
+    expect(match(footnotes, psE).footnotes.map((m) => m.years)).toEqual(['2019 - 2022']);
+    const inRange = match(footnotes, [row(2024, 'PSE', 'JOR')]);
     expect(inRange.footnotes.map((m) => m.years)).toEqual(['2015 - 2018, 2020 - 2024']);
   });
 
@@ -241,11 +240,11 @@ describe('matchFootnotes', () => {
       row(2024, 'SYR', null, ['RET', 'RST', 'NAT', 'RDP']),
       row(2025, 'SYR', null, ['RET', 'RST', 'NAT', 'RDP']),
     ];
-    expect(matchFootnotes(footnotes, solutions, typesOf).footnotes).toEqual([
+    expect(match(footnotes, solutions).footnotes).toEqual([
       expect.objectContaining({ population_types: ['RET', 'RDP'], rows_matched: 2 }),
     ]);
     const stateless = [row(2024, 'SYR', null, ['STA']), row(2025, 'SYR', null, ['STA'])];
-    expect(matchFootnotes(footnotes, stateless, typesOf).total).toBe(0);
+    expect(match(footnotes, stateless).total).toBe(0);
   });
 
   it("counts only the rows at a note's key and year that carry one of its types", () => {
@@ -260,18 +259,18 @@ describe('matchFootnotes', () => {
       row(2024, 'SYR', 'SYR', ['IDP', 'IOC', 'HST', 'RDP']),
       row(2024, 'SYR', 'TUR', ['REF', 'ROC', 'RET']),
     ];
-    const { footnotes: matched, total } = matchFootnotes(notes, rows, typesOf);
+    const { footnotes: matched, total } = match(notes, rows);
     expect(total).toBe(2);
-    expect(matched.map((m) => [m.text, m.rows_matched])).toEqual([
-      ['IDP note', 1],
-      ['Returns note', 3],
-    ]);
+    expect(Object.fromEntries(matched.map((m) => [m.text, m.rows_matched]))).toEqual({
+      'IDP note': 1,
+      'Returns note': 3,
+    });
   });
 
   it('counts a row once when it carries several of the note’s types', () => {
     const notes = [note({ coa_iso: 'TUR', population_type: 'REF,ASY' })].map(toFootnote);
     const rows = [row(2024, 'SYR', 'TUR', ['REF', 'ROC', 'ASY'])];
-    expect(matchFootnotes(notes, rows, typesOf).footnotes[0]?.rows_matched).toBe(1);
+    expect(match(notes, rows).footnotes[0]?.rows_matched).toBe(1);
   });
 
   it('matches a note naming only a folded type through the row’s carrier type', () => {
@@ -280,38 +279,171 @@ describe('matchFootnotes', () => {
       note({ footnote: 'IOC note', coa_iso: 'TUR', population_type: 'IOC' }),
     ].map(toFootnote);
     const rows = [row(2024, 'SYR', 'TUR', withFolded('REF'))];
-    expect(matchFootnotes(notes, rows, typesOf).footnotes.map((m) => m.text)).toEqual(['ROC note']);
+    expect(match(notes, rows).footnotes.map((m) => m.text)).toEqual(['ROC note']);
   });
 
   it('attaches nothing to a row that carries no type', () => {
     const notes = [note({ coa_iso: 'DEU', population_type: 'REF,ASY,IDP,STA' })].map(toFootnote);
-    expect(matchFootnotes(notes, [row(2024, 'SYR', 'DEU', [])], typesOf)).toEqual({
+    expect(match(notes, [row(2024, 'SYR', 'DEU', [])])).toEqual({
       footnotes: [],
       total: 0,
     });
   });
 
-  it('lists country-specific notes before general ones, each group in upstream order', () => {
+  describe('ranking against the inline cut', () => {
+    // Rows in sorted order; a test cuts them after `inline`.
+    const sorted = [
+      row(2024, 'SYR', 'DEU'),
+      row(2024, 'AFG', 'TUR'),
+      row(2024, 'SSD', 'UGA'),
+      row(2024, 'SYR', 'POL', ['REF', 'STA']),
+      row(2024, 'AFG', 'PAK'),
+    ];
+    // Notes in UNHCR's order, named for the rows (by position) each matches.
     const notes = [
-      note({ footnote: 'general A', year: '2024' }),
-      note({ footnote: 'specific B', coa_iso: 'DEU', year: '2024' }),
-      note({ footnote: 'general C', year: '2024' }),
-      note({ footnote: 'specific D', coo_iso: 'SYR', year: '2024' }),
+      note({ footnote: 'POL', coa_iso: 'POL' }),
+      note({ footnote: 'general, every row' }),
+      note({ footnote: 'TUR first', coa_iso: 'TUR' }),
+      note({ footnote: 'UGA', coa_iso: 'UGA' }),
+      note({ footnote: 'DEU', coa_iso: 'DEU' }),
+      note({ footnote: 'TUR second', coa_iso: 'TUR' }),
+      note({ footnote: 'general, POL only', population_type: 'STA' }),
+      note({ footnote: 'AFG, TUR and PAK', coo_iso: 'AFG' }),
     ].map(toFootnote);
-    const { footnotes: matched } = matchFootnotes(notes, [row(2024, 'SYR', 'DEU')], typesOf);
-    expect(matched.map((m) => m.text)).toEqual([
-      'specific B',
-      'specific D',
-      'general A',
-      'general C',
-    ]);
+
+    it.each([
+      [
+        'two rows inline: inline-row caveats first, then those of rows past the cut',
+        2,
+        [
+          'DEU',
+          'TUR first',
+          'TUR second',
+          'AFG, TUR and PAK',
+          'general, every row',
+          'UGA',
+          'POL',
+          'general, POL only',
+        ],
+      ],
+      [
+        'every row inline: one group, by row position',
+        5,
+        [
+          'DEU',
+          'TUR first',
+          'TUR second',
+          'AFG, TUR and PAK',
+          'UGA',
+          'POL',
+          'general, every row',
+          'general, POL only',
+        ],
+      ],
+    ])(
+      'orders country-specific before general, then by first row matched, then UNHCR order: %s',
+      (_label, inline, order) => {
+        const result = match(notes, sorted, inline);
+        expect(result.footnotes.map((m) => m.text)).toEqual(order);
+        expect(result.total).toBe(8);
+      },
+    );
+
+    it('counts rows_matched over the full result, wherever the cut falls', () => {
+      for (const inline of [1, 2, 5]) {
+        const counts = Object.fromEntries(
+          match(notes, sorted, inline).footnotes.map((m) => [m.text, m.rows_matched]),
+        );
+        expect(counts).toEqual({
+          POL: 1,
+          'general, every row': 5,
+          'TUR first': 1,
+          UGA: 1,
+          DEU: 1,
+          'TUR second': 1,
+          'general, POL only': 1,
+          'AFG, TUR and PAK': 2,
+        });
+      }
+    });
+
+    it('ranks a caveat matching an inline row and a row past the cut by its inline row', () => {
+      const order = match(notes, sorted, 2).footnotes.map((m) => m.text);
+      // AFG matches positions 1 (inline) and 4: it sits with position 1, ahead of UGA at 2.
+      expect(order.indexOf('AFG, TUR and PAK')).toBeLessThan(order.indexOf('UGA'));
+      expect(order.indexOf('AFG, TUR and PAK')).toBe(order.indexOf('TUR second') + 1);
+    });
+
+    it(`keeps every inline-row caveat when more than ${FOOTNOTE_CAP} match only rows past the cut`, () => {
+      const pastCut = Array.from({ length: FOOTNOTE_CAP + 5 }, (_, i) =>
+        note({ footnote: `TUR ${i}`, coa_iso: 'TUR' }),
+      );
+      const inlineNotes = ['DEU a', 'DEU b', 'DEU c'].map((text) =>
+        note({ footnote: text, coa_iso: 'DEU' }),
+      );
+      const result = match(
+        [...pastCut, ...inlineNotes].map(toFootnote),
+        [row(2024, 'SYR', 'DEU'), row(2024, 'SYR', 'TUR')],
+        1,
+      );
+      expect(result.total).toBe(FOOTNOTE_CAP + 8);
+      expect(result.footnotes.map((m) => m.text)).toEqual([
+        'DEU a',
+        'DEU b',
+        'DEU c',
+        ...Array.from({ length: FOOTNOTE_CAP - 3 }, (_, i) => `TUR ${i}`),
+      ]);
+    });
+
+    it('takes a caveat’s first row across years, past an earlier-year row its types skip', () => {
+      // Sorted by a count, not by year: a 2025 row comes first, carrying only STA.
+      const multiYear = [
+        row(2025, 'SYR', 'DEU', ['STA']),
+        row(2024, 'SYR', 'DEU'),
+        row(2025, 'SYR', 'DEU'),
+      ];
+      const spanning = [
+        note({ footnote: 'general, STA', population_type: 'STA', year: '2025' }),
+        note({ footnote: 'DEU 2024–2025', coa_iso: 'DEU', year: '2024 - 2025' }),
+      ].map(toFootnote);
+      // The DEU caveat's first row is position 1 (its 2024 row), inside a cut of 2, so it
+      // leads the general caveat; read from its 2025 rows alone it would start past the cut.
+      expect(match(spanning, multiYear, 2).footnotes.map((m) => [m.text, m.rows_matched])).toEqual([
+        ['DEU 2024–2025', 2],
+        ['general, STA', 1],
+      ]);
+    });
+
+    it(`keeps the caveats of the highest-ranked inline rows when more than ${FOOTNOTE_CAP} match inline rows`, () => {
+      const asylums = ['DEU', 'TUR', 'UGA', 'POL', 'PAK'];
+      // Listed in reverse row order, so UNHCR's order alone would keep the lowest rows' caveats.
+      const byRow = asylums
+        .toReversed()
+        .flatMap((asylum) =>
+          Array.from({ length: 5 }, (_, i) =>
+            note({ footnote: `${asylum} ${i}`, coa_iso: asylum }),
+          ),
+        )
+        .map(toFootnote);
+      const result = match(
+        byRow,
+        asylums.map((asylum) => row(2024, 'SYR', asylum)),
+        5,
+      );
+      expect(result.total).toBe(25);
+      expect(result.footnotes.map((m) => m.text)).toEqual(
+        asylums
+          .slice(0, 4)
+          .flatMap((asylum) => Array.from({ length: 5 }, (_, i) => `${asylum} ${i}`)),
+      );
+    });
   });
 
   it(`caps the list at ${FOOTNOTE_CAP} while total counts every match`, () => {
     const notes = Array.from({ length: FOOTNOTE_CAP + 5 }, (_, i) =>
       note({ footnote: `note ${i}`, coa_iso: 'DEU' }),
     ).map(toFootnote);
-    const result = matchFootnotes(notes, [row(2024, null, 'DEU')], typesOf);
+    const result = match(notes, [row(2024, null, 'DEU')]);
     expect(result.footnotes).toHaveLength(FOOTNOTE_CAP);
     expect(result.total).toBe(FOOTNOTE_CAP + 5);
     expect(result.footnotes[0]?.text).toBe('note 0');
@@ -325,10 +457,10 @@ describe('matchFootnotes', () => {
       row(2024, 'SYR', null),
       row(2025, 'SYR', null),
     ];
-    expect(matchFootnotes(notes, rows, typesOf).footnotes[0]?.rows_matched).toBe(3);
+    expect(match(notes, rows).footnotes[0]?.rows_matched).toBe(3);
   });
 
   it('returns nothing for an empty result', () => {
-    expect(matchFootnotes(footnotes, [], typesOf)).toEqual({ footnotes: [], total: 0 });
+    expect(match(footnotes, [])).toEqual({ footnotes: [], total: 0 });
   });
 });

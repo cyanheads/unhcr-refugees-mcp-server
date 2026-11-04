@@ -366,7 +366,11 @@ describe('topic coverage, all eight datasets', () => {
       ['idmc', 'unhcr_get_population', 'stock', 1990, 2025],
       ['footnotes', 'unhcr_get_population', null, 2015, 2025],
     ]);
-    const registered = new Set(buildToolDefinitions({ dropEnabled: false }).map((t) => t.name));
+    const registered = new Set(
+      buildToolDefinitions({ clampLimits: true, dropEnabled: false, rowLimitCap: 10_000 }).map(
+        (t) => t.name,
+      ),
+    );
     for (const entry of coverage) expect(registered.has(entry.tool), entry.dataset).toBe(true);
 
     const text = textOf(result.content);

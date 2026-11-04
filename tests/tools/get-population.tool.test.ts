@@ -18,6 +18,7 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { getPopulationTool } from '@/mcp-server/tools/definitions/get-population.tool.js';
 import {
   DATAFRAME_NAME,
@@ -37,9 +38,9 @@ import {
   populationRow,
   UNRWA_ROWS,
 } from '../fixtures/unhcr.js';
-import { carryDataframeState } from '../helpers/dataframes.js';
-import { type FakeUnhcr, htmlNotFound } from '../helpers/fake-unhcr.js';
-import { errorOf, structuredOf, textOf } from '../helpers/results.js';
+import { carryDataframeState, flowContext } from '../helpers/dataframes.js';
+import { type FakeUnhcr, hangUntilAborted, htmlNotFound } from '../helpers/fake-unhcr.js';
+import { errorOf, structuredOf, textOf, unescapeMarkdown } from '../helpers/results.js';
 import {
   createFailingCanvas,
   createTestCanvas,
@@ -91,7 +92,7 @@ describe('success, both surfaces', () => {
         tables: {
           population: [
             ...POPULATION_ROWS.filter((row) => row.coo_iso === '-' && row.coa_iso === '-'),
-            ...Array.from({ length: 501 }, (_, index) =>
+            ...Array.from({ length: 2_001 }, (_, index) =>
               populationRow(2025, 'SYR', 'DEU', [index, 0, 0, 0, 0, 0, 0, 0, 0]),
             ),
           ],
@@ -104,16 +105,21 @@ describe('success, both surfaces', () => {
         year_from: 2025,
         year_to: 2025,
         sort_by: 'refugees',
-        limit: 501,
+        limit: 2_001,
       });
       const structured = structuredOf(result);
-      expect(structured).toMatchObject({ total_rows: 501, truncated: true, cap: 500, shown: 500 });
+      expect(structured).toMatchObject({
+        total_rows: 2_001,
+        truncated: true,
+        cap: 2_000,
+        shown: 2_000,
+      });
       const rows = structured.rows as { refugees: number }[];
-      expect(rows[0]?.refugees).toBe(500);
-      expect(rows[499]?.refugees).toBe(1);
-      expect(structured.notice).toContain('Requested limit 501; effective limit 500.');
+      expect(rows[0]?.refugees).toBe(2_000);
+      expect(rows[1_999]?.refugees).toBe(1);
+      expect(structured.notice).toContain('Requested limit 2001; effective limit 2000.');
       expect(structured.notice).toContain(
-        enabled ? '(501 rows)' : 'Showing 500 of 501 rows. Dataframes are unavailable',
+        enabled ? '(2001 rows)' : 'Showing 2000 of 2001 rows. Dataframes are unavailable',
       );
       expect(textOf(result.content)).toContain(String(structured.notice));
     },
@@ -124,8 +130,8 @@ describe('success, both surfaces', () => {
       { origin: 'SYR', asylum: 'JPN' },
       { origin: 'SYR', stage: true },
     ]) {
-      const result = await runToolContract(getPopulationTool, { ...input, limit: 501 });
-      expect(structuredOf(result).notice).toContain('Requested limit 501; effective limit 500.');
+      const result = await runToolContract(getPopulationTool, { ...input, limit: 2_001 });
+      expect(structuredOf(result).notice).toContain('Requested limit 2001; effective limit 2000.');
       expect(textOf(result.content)).toContain(String(structuredOf(result).notice));
       expect(structuredOf(result)).not.toHaveProperty('truncated');
     }
@@ -135,21 +141,35 @@ describe('success, both surfaces', () => {
       origin: 'SYR',
       expand: 'asylum',
       year_from: 2025,
-      limit: 501,
+      limit: 2_001,
     });
     expect(structuredOf(partial)).toMatchObject({ complete: false });
-    expect(structuredOf(partial).notice).toContain('Requested limit 501; effective limit 500.');
+    expect(structuredOf(partial).notice).toContain('Requested limit 2001; effective limit 2000.');
     expect(structuredOf(partial).notice).toContain('this result is partial');
     expect(textOf(partial.content)).toContain(String(structuredOf(partial).notice));
   });
-  it.each([501, 1_000_000])(
-    'discloses a clamped display request of %s on both surfaces',
-    async (limit) => {
-      const result = await runToolContract(getPopulationTool, { origin: 'SYR', limit });
-      const structured = structuredOf(result);
-      expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 500.`);
-      expect(textOf(result.content)).toContain(String(structured.notice));
-      expect(structured).not.toHaveProperty('truncated');
+  it.each([2_001])('discloses a clamped display request of %s on both surfaces', async (limit) => {
+    const result = await runToolContract(getPopulationTool, { origin: 'SYR', limit });
+    const structured = structuredOf(result);
+    expect(structured.notice).toContain(`Requested limit ${limit}; effective limit 2000.`);
+    expect(textOf(result.content)).toContain(String(structured.notice));
+    expect(structured).not.toHaveProperty('truncated');
+  });
+  it.each([
+    [2_000, []],
+    [2_001, [{ tool: 'unhcr_get_population', field: 'limit', requested: 2_001, effective: 2_000 }]],
+  ])(
+    'clamps limit %s only above the cap, logging it under this tool’s name',
+    async (limit, logged) => {
+      const ctx = context();
+      await call({ origin: 'SYR', limit }, ctx);
+      const clampLines = (ctx.log as MockContextLogger).calls.filter(
+        (line) => line.msg === 'Count input clamped',
+      );
+      expect(clampLines.map((line) => line.data)).toEqual(logged);
+      expect(String(getEnrichment(ctx).notice ?? '').includes('Requested limit')).toBe(
+        logged.length > 0,
+      );
     },
   );
   it('returns an under-cap page through the production enrichment parse', async () => {
@@ -261,14 +281,15 @@ describe('success, both surfaces', () => {
     });
     const structured = structuredOf(result);
     expect(structured).toMatchObject({ total_rows: 5, footnotes_total: 4 });
+    // Every row is inline, so the caveats follow the first row each matches: JOR, LBN, SYR→SYR.
     expect(
       (structured.footnotes as { rows_matched: number; text: string }[]).map((note) => [
         note.text,
         note.rows_matched,
       ]),
     ).toEqual([
-      ['The Lebanese government estimates that 1.5 million Syrians are in Lebanon.', 1],
       ['Return figures for Syria combine government and UNHCR operational estimates.', 4],
+      ['The Lebanese government estimates that 1.5 million Syrians are in Lebanon.', 1],
       ['IDP figures for Syria are estimates.', 1],
       ['IDP-like figures for Syria are estimates.', 1],
     ]);
@@ -404,7 +425,7 @@ describe('scope inputs', () => {
       include_nowcast: '' as unknown as boolean,
     };
     expect(getPopulationTool.input.parse(blanks)).toMatchObject({
-      limit: 100,
+      limit: 25,
       stage: false,
       include_nowcast: false,
     });
@@ -442,24 +463,43 @@ describe('scope inputs', () => {
     ['a fractional year', { year_from: 2020.5 }],
     ['a non-numeric year', { year_from: 'recent' as unknown as number }],
     ['limit 0', { limit: 0 }],
-    ['limit above hard ceiling', { limit: 1_000_001 }],
+    ['a fractional limit', { limit: 1.5 }],
     ['an unknown expand', { expand: 'sideways' as 'none' }],
     ['a sort field this tool lacks', { sort_by: 'total' as 'year' }],
-    ['more than 50 codes as a list', { origin: Array.from({ length: 51 }, () => 'SYR') }],
+    ['more than 1,000 entries as a list', { origin: Array.from({ length: 1_001 }, () => 'SYR') }],
   ])('rejects %s as invalid params before any upstream request', async (_label, input) => {
     const result = await runToolContract(getPopulationTool, input as Input);
     expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(fake.calls).toHaveLength(0);
   });
 
-  it('rejects a string that splits past the 50-code cap, pointing at expand, before any request', async () => {
-    const codes = Array.from({ length: 51 }, (_, i) => `X${String(i).padStart(2, '0')}`).join(',');
-    const result = await runToolContract(getPopulationTool, { asylum: codes });
-    const error = errorOf(result);
-    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(error.message).toContain('the limit is 50');
-    expect(error.data?.recovery?.hint).toContain('set expand to list every country');
-    expect(fake.calls).toHaveLength(0);
+  it.each([
+    ['a string', (codes: string[]) => codes.join(',')],
+    ['a list', (codes: string[]) => codes],
+  ])(
+    'fails 251 distinct codes as %s with too_many_country_codes before any request, on both surfaces',
+    async (_form, encode) => {
+      const codes = Array.from({ length: 251 }, (_, i) => `X${String(i).padStart(3, '0')}`);
+      const result = await runToolContract(getPopulationTool, { asylum: encode(codes) });
+      const message = 'asylum lists 251 distinct country codes; the limit is 250.';
+      const hint =
+        'List at most 250 distinct codes in asylum, or leave asylum empty and set expand to list every country.';
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message,
+        data: { reason: 'too_many_country_codes', count: 251, max: 250, recovery: { hint } },
+      });
+      const text = unescapeMarkdown(textOf(result.content));
+      expect(text).toContain(message);
+      expect(text).toContain(hint);
+      expect(text).toContain('reason too_many_country_codes');
+      expect(fake.calls).toHaveLength(0);
+    },
+  );
+
+  it('counts a list after de-duplication, so 251 copies of one code pass as that code', async () => {
+    const result = await call({ origin: Array.from({ length: 251 }, () => 'syr') });
+    expect(result.applied_scope.origin).toEqual({ mode: 'listed', codes: ['SYR'] });
   });
 });
 
@@ -593,6 +633,32 @@ describe('declared errors, by reason', () => {
       },
     });
     expect(textOf(result.content)).toContain('reason upstream_busy · retryable');
+  });
+
+  it('fails a spent 45 s call deadline as a retryable Timeout that names the cached-page resume, on both surfaces', async () => {
+    // Faked clock: the real deadline, retry clock, and pacer run, and no test waits 45 s.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      fake.intercept({
+        endpoint: 'population',
+        matches: (params) => params.has('yearFrom'),
+        respond: hangUntilAborted,
+      });
+      const pending = runToolContract(getPopulationTool, { origin: 'SYR' });
+      await vi.advanceTimersByTimeAsync(45_000);
+      const result = await pending;
+      const hint =
+        'Pages fetched before the deadline are cached, so retrying the identical call promptly resumes from them and fetches only the rest. If the retry also times out, narrow the year window or drop expand so the call needs fewer upstream requests.';
+      expect(errorOf(result)).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { retryable: true, recovery: { hint } },
+      });
+      const text = unescapeMarkdown(textOf(result.content));
+      expect(text).toContain(hint);
+      expect(text).toContain('(retryable)');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fails the call when a companion series fails, rather than dropping it silently', async () => {
@@ -745,7 +811,97 @@ describe('companion series', () => {
   });
 });
 
+describe('footnote ranking', () => {
+  const asylumNote = (asylum: string | null, footnote: string) =>
+    footnoteRow({ footnote, year: '2025', coo: null, coa: asylum, population_type: 'REF' });
+
+  it.each(['staged', 'staging fails', 'dataframes unavailable'] as const)(
+    'keeps the inline row’s caveat ahead of the cap that caveats past the cut would fill, on both surfaces (%s)',
+    async (mode) => {
+      disposeUnhcrService();
+      ({ fake } = initFakeUpstream({
+        tables: {
+          // Illustrative: 21 caveats on Germany's row, listed ahead of one on Türkiye's.
+          footnotes: [
+            ...Array.from({ length: 21 }, (_, i) => asylumNote('DEU', `Germany caveat ${i}.`)),
+            asylumNote('TUR', 'Türkiye caveat.'),
+          ],
+        },
+      }));
+      if (mode === 'staging fails')
+        initCanvasBridge(createFailingCanvas().canvas, { ttlMs: 60_000 });
+      if (mode === 'dataframes unavailable') initCanvasBridge(undefined);
+      // Sorted by refugees, Türkiye's row is first and the only one inline.
+      const result = await runToolContract(getPopulationTool, {
+        ...syrPairs2025,
+        sort_by: 'refugees',
+        limit: 1,
+        stage: true,
+      });
+      const structured = structuredOf(result);
+      expect((structured.rows as { asylum_iso3: string }[]).map((row) => row.asylum_iso3)).toEqual([
+        'TUR',
+      ]);
+      expect(structured.footnotes_total).toBe(22);
+      expect((structured.footnotes as { text: string }[]).map((note) => note.text)).toEqual([
+        'Türkiye caveat.',
+        ...Array.from({ length: 19 }, (_, i) => `Germany caveat ${i}.`),
+      ]);
+      const text = textOf(result.content);
+      expect(text).toContain('### Footnotes (20 of 22)');
+      expect(text).toContain('> Türkiye caveat.');
+      expect(text).not.toContain('Germany caveat 19.');
+    },
+  );
+
+  it('cuts the groups at the effective limit after the clamp, never the requested one', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream({
+      tables: {
+        population: [
+          ...POPULATION_ROWS.filter((row) => row.coo_iso === '-' && row.coa_iso === '-'),
+          ...Array.from({ length: 2_000 }, (_, index) =>
+            populationRow(2025, 'SYR', 'DEU', [10_000 + index, 0, 0, 0, 0, 0, 0, 0, 0]),
+          ),
+          populationRow(2025, 'SYR', 'TUR', [1, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ],
+        footnotes: [asylumNote('TUR', 'Türkiye caveat.'), asylumNote(null, 'Global caveat.')],
+      },
+    }));
+    const result = await call({ ...syrPairs2025, sort_by: 'refugees', limit: 2_001 });
+    // Türkiye's row sorts last, at position 2,000: past the effective cut of 2,000, so its
+    // country-specific caveat follows the general one every inline row carries.
+    expect(result.rows).toHaveLength(2_000);
+    expect(result.footnotes.map((note) => note.text)).toEqual([
+      'Global caveat.',
+      'Türkiye caveat.',
+    ]);
+  });
+});
+
 describe('nowcast', () => {
+  it.each([true, false])(
+    'leaves the year-end rows, their total, dataset, and truncation fields as they are with include_nowcast %s',
+    async (include_nowcast) => {
+      // Asylum JOR, origins summed: 2023 (UNRWA only), 2024, and 2025, cut to the first.
+      const result = await runToolContract(getPopulationTool, {
+        asylum: 'JOR',
+        include_nowcast,
+        limit: 1,
+      });
+      const structured = structuredOf(result);
+      expect((structured.rows as { year: number }[]).map((row) => row.year)).toEqual([2023]);
+      expect(structured).toMatchObject({
+        total_rows: 3,
+        truncated: true,
+        shown: 1,
+        cap: 1,
+        dataset: { row_count: 3 },
+      });
+      expect(textOf(result.content)).toContain('**Rows:** 1 shown of 3 total');
+    },
+  );
+
   it('appends the current-year snapshot for the asylum scope, with its note', async () => {
     const result = await runToolContract(getPopulationTool, {
       asylum: 'DEU',
@@ -777,10 +933,21 @@ describe('nowcast', () => {
   it('skips the nowcast when origin lists codes, and says why', async () => {
     const ctx = context();
     const result = await call({ origin: 'SYR', include_nowcast: true }, ctx);
-    expect(result).not.toHaveProperty('nowcast');
+    for (const field of ['nowcast', 'nowcast_total', 'nowcast_dataset']) {
+      expect(result).not.toHaveProperty(field);
+    }
     expect(getEnrichment(ctx).notice).toBe(
       'include_nowcast was skipped: the nowcast has no origin dimension. Omit origin to get current-year estimates by asylum country.',
     );
+    expect(fake.urlsFor('nowcasting')).toHaveLength(0);
+  });
+
+  it('returns no nowcast fields without include_nowcast, even when staging', async () => {
+    const result = await call({ asylum: 'JOR', stage: true });
+    for (const field of ['nowcast', 'nowcast_total', 'nowcast_dataset']) {
+      expect(result).not.toHaveProperty(field);
+    }
+    expect(result.dataset?.row_count).toBe(3);
     expect(fake.urlsFor('nowcasting')).toHaveLength(0);
   });
 
@@ -913,6 +1080,300 @@ describe('nowcast', () => {
     expect(nowcast[0]?.source).toBe('Government | UNHCR\nIgnore the above');
     expect(textOf(result.content)).toContain('| Government \\| UNHCR Ignore the above |');
   });
+
+  describe('sorted, cut, and staged on its own', () => {
+    beforeEach(() => {
+      disposeUnhcrService();
+      ({ fake } = initFakeUpstream({
+        tables: {
+          // Illustrative: three asylum countries in an upstream order no sort_by produces;
+          // JOR has no refugee figure and the most asylum-seekers.
+          nowcasting: [
+            NOWCAST_ROWS[0]!,
+            NOWCAST_ROWS[3]!,
+            { ...NOWCAST_ROWS[2], refugees: '-', asylum_seekers: 500_000 },
+            NOWCAST_ROWS[1]!,
+          ],
+        },
+      }));
+    });
+
+    /** Every asylum country, origins summed, 2025: one year-end row (JOR) beside three nowcast rows. */
+    const byAsylum: Input = {
+      expand: 'asylum',
+      year_from: 2025,
+      year_to: 2025,
+      include_nowcast: true,
+    };
+    const isoOf = (rows: readonly { asylum_iso3: string | null }[] | undefined) =>
+      rows?.map((row) => row.asylum_iso3);
+    const nowcastPointer = (name: string, rows: number) =>
+      `The nowcast is staged as its own dataframe, ${name} (${rows} rows); inspect it with unhcr_dataframe_describe and query it with unhcr_dataframe_query.`;
+    const yearEndPointer = (name: string, rows: number) =>
+      `Full set staged as ${name} (${rows} rows). Use unhcr_dataframe_describe to inspect its columns, then unhcr_dataframe_query to analyze it with SQL.`;
+
+    it.each([
+      ['refugees', 3, ['DEU', 'TUR', 'JOR']],
+      ['refugees', 2, ['DEU', 'TUR']],
+      ['asylum_seekers', 2, ['JOR', 'DEU']],
+      ['year', 2, ['DEU', 'JOR']],
+      ['idps', 2, ['DEU', 'JOR']],
+    ] as const)(
+      'orders it under sort_by %s, nulls last, and cuts it at limit %i',
+      async (sort_by, limit, order) => {
+        const result = await call({ ...byAsylum, sort_by, limit });
+        expect(isoOf(result.nowcast)).toEqual(order);
+        expect(result.nowcast_total).toBe(3);
+      },
+    );
+
+    it('reports a cut nowcast and its own dataframe on both surfaces, leaving the truncation fields to rows', async () => {
+      const result = await runToolContract(getPopulationTool, {
+        ...byAsylum,
+        sort_by: 'refugees',
+        limit: 2,
+      });
+      const structured = structuredOf(result);
+      const staged = structured.nowcast_dataset as { expires_at: string; name: string };
+      expect(staged).toEqual({
+        name: expect.stringMatching(DATAFRAME_NAME),
+        row_count: 3,
+        expires_at: expect.any(String),
+      });
+      expect(structured).toMatchObject({ total_rows: 1, nowcast_total: 3 });
+      for (const field of ['dataset', 'truncated', 'shown', 'cap']) {
+        expect(structured).not.toHaveProperty(field);
+      }
+      expect(structured.notice).toBe(
+        `Showing 2 of 3 nowcast rows. ${nowcastPointer(staged.name, 3)}`,
+      );
+      const text = textOf(result.content);
+      expect(text).toContain('**Nowcast rows:** 2 shown of 3 total');
+      expect(text).toContain(
+        `**Nowcast dataset:** ${staged.name} (3 rows, expires ${staged.expires_at})`,
+      );
+      expect(text).toContain(String(structured.notice));
+    });
+
+    it('stages it with asylum and region columns and no origin columns', async () => {
+      const ctx = flowContext();
+      const result = await call({ ...byAsylum, sort_by: 'refugees', limit: 2 }, ctx);
+      const name = result.nowcast_dataset?.name ?? '';
+      const described = await dataframeDescribeTool.handler(
+        dataframeDescribeTool.input.parse({ name }),
+        ctx,
+      );
+      expect(described.dataframes[0]).toMatchObject({
+        source_tool: 'unhcr_get_population',
+        row_count: 3,
+        complete: true,
+        providers: [],
+      });
+      expect(
+        described.dataframes[0]?.column_schema.map((column) => [column.name, column.type]),
+      ).toEqual([
+        ['year', 'INTEGER'],
+        ['month', 'VARCHAR'],
+        ['asylum_iso3', 'VARCHAR'],
+        ['asylum_unhcr_code', 'VARCHAR'],
+        ['asylum_name', 'VARCHAR'],
+        ['asylum_unhcr_region', 'VARCHAR'],
+        ['asylum_unsd_region', 'VARCHAR'],
+        ['refugees', 'INTEGER'],
+        ['asylum_seekers', 'INTEGER'],
+        ['source', 'VARCHAR'],
+      ]);
+      const { result: rows } = await getCanvasBridge()!.query(
+        ctx,
+        `SELECT asylum_iso3, month, refugees, asylum_unhcr_region, asylum_unsd_region FROM ${name} ORDER BY asylum_iso3`,
+        { rowLimit: 10 },
+      );
+      expect(rows.rows).toEqual([
+        {
+          asylum_iso3: 'DEU',
+          month: 'August',
+          refugees: 2652400,
+          asylum_unhcr_region: 'Europe',
+          asylum_unsd_region: 'Western Europe',
+        },
+        {
+          asylum_iso3: 'JOR',
+          month: 'August',
+          refugees: null,
+          asylum_unhcr_region: 'Middle East and North Africa',
+          asylum_unsd_region: 'Western Asia',
+        },
+        {
+          asylum_iso3: 'TUR',
+          month: 'August',
+          refugees: 2257058,
+          asylum_unhcr_region: 'Europe',
+          asylum_unsd_region: 'Western Asia',
+        },
+      ]);
+    });
+
+    it('stages both tables when stage is set and both fit inline', async () => {
+      const ctx = context();
+      const result = await call({ asylum: 'JOR', include_nowcast: true, stage: true }, ctx);
+      const dataset = result.dataset!;
+      const nowcastDataset = result.nowcast_dataset!;
+      expect([dataset.row_count, nowcastDataset.row_count]).toEqual([3, 1]);
+      expect(nowcastDataset.name).not.toBe(dataset.name);
+      expect(getEnrichment(ctx).notice).toBe(
+        `${yearEndPointer(dataset.name, 3)} ${nowcastPointer(nowcastDataset.name, 1)}`,
+      );
+    });
+
+    it('stages only the year-end rows when only they overflow', async () => {
+      const ctx = context();
+      const result = await call({ asylum: 'JOR', include_nowcast: true, limit: 1 }, ctx);
+      expect(result.dataset?.row_count).toBe(3);
+      expect(result).not.toHaveProperty('nowcast_dataset');
+      expect(result).toMatchObject({ nowcast_total: 1 });
+      expect(getEnrichment(ctx).notice).toBe(yearEndPointer(result.dataset!.name, 3));
+    });
+
+    it.each([
+      [
+        'beside the year-end rows',
+        { asylum: 'JPN', include_nowcast: true, stage: true },
+        "UNHCR reports no population rows for JPN in 1951–2025. Widen the year window, or check the dataset's span with unhcr_list_reference (topic coverage).",
+      ],
+      [
+        'alone, after the latest year',
+        { asylum: 'JPN', year_from: 2026, include_nowcast: true, stage: true },
+        "Year-end figures stop at 2025, and UNHCR's nowcast has no row for this asylum scope.",
+      ],
+    ] as const)(
+      'never stages an empty nowcast, even on request, nor says it could not, on both surfaces (%s)',
+      async (_label, input, notice) => {
+        const result = await runToolContract(getPopulationTool, input);
+        const structured = structuredOf(result);
+        expect(structured).toMatchObject({ nowcast: [], nowcast_total: 0, notice });
+        expect(structured).not.toHaveProperty('nowcast_dataset');
+        const text = textOf(result.content);
+        expect(text).toContain('**Nowcast rows:** 0 shown of 0 total');
+        expect(text).not.toContain('**Nowcast dataset:**');
+        expect(unescapeMarkdown(text)).toContain(notice);
+      },
+    );
+
+    it('keeps the inline nowcast when it alone fails to stage, the year-end dataset unaffected', async () => {
+      const bridge = getCanvasBridge()!;
+      const register = bridge.register.bind(bridge);
+      // register answers undefined for any failed registration; fail only the nowcast's.
+      vi.spyOn(bridge, 'register').mockImplementation((ctx, options) =>
+        options.schema.some((column) => column.name === 'month')
+          ? Promise.resolve(undefined)
+          : register(ctx, options),
+      );
+      const ctx = context();
+      const result = await call({ asylum: 'JOR', include_nowcast: true, stage: true }, ctx);
+      expect(result.dataset?.row_count).toBe(3);
+      expect(isoOf(result.nowcast)).toEqual(['JOR']);
+      expect(result).not.toHaveProperty('nowcast_dataset');
+      expect(getEnrichment(ctx).notice).toBe(
+        `${yearEndPointer(result.dataset!.name, 3)} The nowcast could not be staged as a dataframe; every nowcast row is inline.`,
+      );
+    });
+
+    it.each(['dataframes unavailable', 'staging fails'] as const)(
+      'says how to see the rest of a cut nowcast it could not stage, and the recipe works as written (%s)',
+      async (mode) => {
+        if (mode === 'staging fails') {
+          initCanvasBridge(createFailingCanvas().canvas, { ttlMs: 60_000 });
+        } else {
+          initCanvasBridge(undefined);
+        }
+        const ctx = context();
+        const cut = await call({ ...byAsylum, limit: 2 }, ctx);
+        expect(cut.nowcast).toHaveLength(2);
+        expect(cut).toMatchObject({ nowcast_total: 3 });
+        expect(cut).not.toHaveProperty('nowcast_dataset');
+        expect(getEnrichment(ctx).notice).toBe(
+          mode === 'staging fails'
+            ? 'Showing 2 of 3 nowcast rows. The full nowcast could not be staged as a dataframe, so raise limit (max 2000) to see the rest.'
+            : 'Showing 2 of 3 nowcast rows. Dataframes are unavailable in this deployment, so raise limit (max 2000) to see the rest.',
+        );
+
+        // The recipe as written: limit at its max.
+        const next = context();
+        const whole = await call({ ...byAsylum, limit: 2000 }, next);
+        expect(whole.nowcast).toHaveLength(3);
+        expect(whole.nowcast_total).toBe(3);
+        expect(getEnrichment(next).notice).toBeUndefined();
+      },
+    );
+
+    it.each([
+      [
+        'beside the year-end rows',
+        { asylum: 'JOR', include_nowcast: true, stage: true },
+        'stage was ignored: dataframes are unavailable in this deployment.',
+      ],
+      [
+        'alone, after the latest year',
+        { asylum: 'JOR', year_from: 2026, include_nowcast: true, stage: true },
+        "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. stage was ignored: dataframes are unavailable in this deployment.",
+      ],
+      [
+        'with both tables cut',
+        { expand: 'asylum', year_from: 2024, year_to: 2025, include_nowcast: true, limit: 1 },
+        'Showing 1 of 2 rows. Dataframes are unavailable in this deployment, so narrow the filters or year window, or raise limit (max 2000), to see the rest. Showing 1 of 3 nowcast rows; raise limit (max 2000) to see the rest.',
+      ],
+    ] as const)(
+      'without a canvas, says dataframes are unavailable once (%s)',
+      async (_label, input, notice) => {
+        initCanvasBridge(undefined);
+        const ctx = context();
+        await call(input, ctx);
+        expect(getEnrichment(ctx).notice).toBe(notice);
+      },
+    );
+
+    it('sorts, cuts, and stages it in a window after the latest year, keeping the year-end notice', async () => {
+      const result = await runToolContract(getPopulationTool, {
+        year_from: 2026,
+        include_nowcast: true,
+        expand: 'asylum',
+        limit: 2,
+      });
+      const structured = structuredOf(result);
+      const staged = structured.nowcast_dataset as { name: string; row_count: number };
+      expect(structured).toMatchObject({ rows: [], total_rows: 0, nowcast_total: 3 });
+      expect(isoOf(structured.nowcast as { asylum_iso3: string }[])).toEqual(['DEU', 'JOR']);
+      expect(staged.row_count).toBe(3);
+      expect(structured).not.toHaveProperty('truncated');
+      expect(structured.notice).toBe(
+        `Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. Showing 2 of 3 nowcast rows. ${nowcastPointer(staged.name, 3)}`,
+      );
+      const text = textOf(result.content);
+      expect(text).toContain('**Nowcast rows:** 2 shown of 3 total');
+      expect(text).toContain(`**Nowcast dataset:** ${staged.name} (3 rows`);
+    });
+
+    it('names the dataframes its staging evicted to stay within the budget, on both surfaces', async () => {
+      const ctx = context();
+      const first = await call({ origin: 'SYR', asylum: 'DEU', stage: true }, ctx);
+      initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
+      const seeded: typeof getPopulationTool = {
+        ...getPopulationTool,
+        handler: async (input, next) => {
+          await carryDataframeState(ctx, next);
+          return getPopulationTool.handler(input, next);
+        },
+      };
+      const result = await runToolContract(seeded, { ...byAsylum, limit: 2 });
+      expect(structuredOf(result).nowcast_dataset).toMatchObject({
+        row_count: 3,
+        evicted: [first.dataset?.name],
+      });
+      expect(textOf(result.content)).toContain(
+        `**Evicted to stay within the staging budget:** ${first.dataset?.name}`,
+      );
+    });
+  });
 });
 
 describe('sorting', () => {
@@ -1032,7 +1493,7 @@ describe('staging', () => {
     expect(structured).not.toHaveProperty('dataset');
     expect(structured).toMatchObject({ truncated: true, shown: 2, cap: 2 });
     expect(structured.notice).toBe(
-      'Showing 2 of 5 rows. Dataframes are unavailable in this deployment, so narrow the filters or year window, or raise limit (max 500), to see the rest.',
+      'Showing 2 of 5 rows. Dataframes are unavailable in this deployment, so narrow the filters or year window, or raise limit (max 2000), to see the rest.',
     );
   });
 
@@ -1054,7 +1515,7 @@ describe('staging', () => {
     expect(firstStructured.rows).toHaveLength(2);
     expect(firstStructured).not.toHaveProperty('dataset');
     expect(firstStructured.notice).toBe(
-      'The full set could not be staged as a dataframe; narrow the filters or year window, or raise limit (max 500), so it fits inline.',
+      'The full set could not be staged as a dataframe; narrow the filters or year window, or raise limit (max 2000), so it fits inline.',
     );
     expect(getCanvasBridge()?.available).toBe(false);
 

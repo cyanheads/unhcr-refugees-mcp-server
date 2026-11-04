@@ -26,7 +26,7 @@ export const dataframeDropTool = tool('unhcr_dataframe_drop', {
       .max(DATAFRAME_NAME_LENGTH)
       .regex(DATAFRAME_NAME)
       .describe(
-        'Dataframe to drop, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name a unhcr_get_* result returned, or a register_as name.',
+        'Dataframe to drop, as df_XXXXX_XXXXX (uppercase letters and digits): the dataset.name or nowcast_dataset.name a unhcr_get_* result returned, or a register_as name.',
       ),
   }),
 

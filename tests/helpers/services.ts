@@ -38,10 +38,13 @@ export function initFakeUpstream(
   return { fake, service };
 }
 
-/** A real DuckDB-backed canvas, in memory, with the background sweeper off. */
-export function createTestCanvas(): DataCanvas {
+/**
+ * A real DuckDB-backed canvas, in memory, with the background sweeper off.
+ * `defaultRowLimit` is the canvas row cap (`CANVAS_DEFAULT_ROW_LIMIT`).
+ */
+export function createTestCanvas(defaultRowLimit = 10_000): DataCanvas {
   const provider = new DuckdbProvider({
-    defaultRowLimit: 10_000,
+    defaultRowLimit,
     exportRootPath: join(tmpdir(), 'unhcr-refugees-test-exports'),
     memoryLimitMb: 256,
     schemaSniffRows: 100,

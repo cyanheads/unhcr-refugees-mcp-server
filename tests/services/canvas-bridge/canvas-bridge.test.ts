@@ -349,16 +349,10 @@ describe('query', () => {
     expect(listed).toHaveLength(1);
   });
 
-  it('honors preview and reports a capped result', async () => {
+  it('reports a result capped at rowLimit', async () => {
     const { bridge, ctx, name } = await stageOne();
     const capped = await bridge.query(ctx, `SELECT * FROM ${name}`, { rowLimit: 1 });
     expect(capped.result).toMatchObject({ rowCount: 1, truncated: true });
-    const previewed = await bridge.query(ctx, `SELECT * FROM ${name}`, {
-      rowLimit: 10,
-      preview: 1,
-    });
-    expect(previewed.result.rows).toHaveLength(1);
-    expect(previewed.result.rowCount).toBe(2);
   });
 
   it('retains both incomplete roots across joined descendants after ancestor eviction and expiry', async () => {
@@ -390,7 +384,7 @@ describe('query', () => {
     const grandchild = await bridge.query(
       ctx,
       "SELECT * FROM query('SELECT * FROM df_CHILD_00020') WHERE false",
-      { rowLimit: 1, preview: 0, registerAs: 'df_GRAND_00020' },
+      { rowLimit: 1, registerAs: 'df_GRAND_00020' },
     );
     expect(grandchild).toMatchObject({
       complete: false,
@@ -403,83 +397,6 @@ describe('query', () => {
       complete: true,
       incompleteSources: [],
     });
-  });
-});
-
-describe('result chunk retention', () => {
-  const provenance = { complete: false, incompleteSources: ['df_ROOTS_00001'], providers: [] };
-
-  it('accounts chunks in the row budget while protecting the source snapshot and saved table', async () => {
-    const bridge = new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 5 });
-    const ctx = queryContext();
-    const saved = await bridge.register(ctx, rowsOf(2));
-    const original = await bridge.stageResultChunks(ctx, { value: 'x' }, provenance, [saved!.name]);
-    const next = await bridge.stageResultChunks(ctx, { value: 'x'.repeat(7000) }, provenance, [
-      original.name,
-      saved!.name,
-    ]);
-    expect((await bridge.describe(ctx)).map((meta) => meta.tableName).sort()).toEqual(
-      [saved!.name, original.name, next.name].sort(),
-    );
-    await expect(
-      bridge.stageResultChunks(ctx, { value: 'x'.repeat(13000) }, provenance, [
-        original.name,
-        saved!.name,
-      ]),
-    ).rejects.toMatchObject({ data: { reason: 'result_storage_unavailable', retryable: false } });
-    expect(await canvasTables(ctx)).toEqual([saved!.name, original.name, next.name].sort());
-    expect((await bridge.describe(ctx, next.name))[0]).toMatchObject({
-      resultChunks: true,
-      complete: false,
-      incompleteSources: provenance.incompleteSources,
-    });
-  });
-
-  it('keeps a chunk source while register_as saves a page and refuses an oversized protected pair', async () => {
-    const bridge = new CanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
-    const ctx = queryContext();
-    const source = await bridge.stageResultChunks(ctx, { value: 'x'.repeat(7000) }, provenance);
-    await bridge.query(ctx, `SELECT * FROM ${source.name} LIMIT 1`, {
-      rowLimit: 1,
-      registerAs: 'df_SAVED_00021',
-    });
-    expect(await bridge.describe(ctx, source.name)).toHaveLength(1);
-    await expect(
-      bridge.query(ctx, `SELECT * FROM ${source.name}`, {
-        rowLimit: 10,
-        registerAs: 'df_SAVED_00022',
-      }),
-    ).rejects.toMatchObject({ data: { reason: 'result_storage_unavailable' } });
-    expect(await bridge.describe(ctx, source.name)).toHaveLength(1);
-    expect(await bridge.describe(ctx, 'df_SAVED_00022')).toEqual([]);
-  });
-
-  it('cleans up a failed chunk registration and returns bounded actionable storage failure', async () => {
-    const drop = vi.fn(async () => true);
-    const stub = {
-      acquire: vi.fn(async () => ({
-        canvasId: 'STUBCANVAS',
-        registerTable: vi.fn(async () => {
-          throw new Error('disk full: private path');
-        }),
-        drop,
-      })),
-    } as unknown as DataCanvas;
-    const bridge = new CanvasBridge(stub, { ttlMs: 60_000 });
-    const ctx = queryContext();
-    await expect(bridge.stageResultChunks(ctx, { value: 'x' }, provenance)).rejects.toMatchObject({
-      data: {
-        reason: 'result_storage_unavailable',
-        retryable: false,
-        recovery: {
-          hint: dataframeQueryTool.errors?.find(
-            (entry) => entry.reason === 'result_storage_unavailable',
-          )?.recovery,
-        },
-      },
-    });
-    expect(drop).toHaveBeenCalledOnce();
-    expect(await bridge.describe(ctx)).toEqual([]);
   });
 });
 
