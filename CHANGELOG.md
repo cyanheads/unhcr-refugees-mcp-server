@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-25 · ⚠️ Breaking
+
+Asylum tools carry UNHCR footnotes, list inputs accept strings, name_contains resolves common English country names, and concurrent first stagings share one canvas. unhcr_dataframe_query now refuses 35 metadata-view names used as identifiers (breaking).
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-11-04 · ⚠️ Breaking
 
 Count inputs share one clamped cap and a 25-row default, the SQL byte budget and its chunk fields are removed, footnotes and the nowcast follow the inline cut, and the server publishes its first agent skill.

@@ -1,6 +1,6 @@
 # unhcr-refugees-mcp-server - Directory Structure
 
-Generated on: 2026-11-04 10:58:51
+Generated on: 2026-11-25 10:40:32
 
 ```text
 unhcr-refugees-mcp-server/
@@ -27,6 +27,7 @@ unhcr-refugees-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -170,6 +171,7 @@ unhcr-refugees-mcp-server/
 │   │   └── unhcr/
 │   │       ├── asylum-aggregate.ts
 │   │       ├── codes.ts
+│   │       ├── country-aliases.ts
 │   │       ├── country-input.ts
 │   │       ├── footnote-match.ts
 │   │       ├── normalize.ts
@@ -197,6 +199,7 @@ unhcr-refugees-mcp-server/
 │   │   └── unhcr/
 │   │       ├── asylum-aggregate.test.ts
 │   │       ├── codes.test.ts
+│   │       ├── country-aliases.test.ts
 │   │       ├── country-input.test.ts
 │   │       ├── footnote-match.test.ts
 │   │       ├── normalize.test.ts
@@ -226,6 +229,7 @@ unhcr-refugees-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
