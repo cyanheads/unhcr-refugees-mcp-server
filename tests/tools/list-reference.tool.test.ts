@@ -2,22 +2,22 @@
  * @fileoverview Tests for unhcr_list_reference over the fake UNHCR upstream:
  * every topic on both surfaces (`structuredContent` and `content[]`), strict
  * name matching, common English names ahead of it, the name_contains notices,
- * the enrichment contract on a matched page and on an empty one, and
- * upstream_busy.
+ * the enrichment contract on a matched page and on an empty one,
+ * upstream_busy, and an empty bureau member list.
  * @module tests/tools/list-reference.tool.test
  */
 
 import type { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { DATASETS } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { COUNTRY_ROWS, envelope, type RawRow, USA_COUNTRY_ROW } from '../fixtures/unhcr.js';
 import type { FakeUnhcr } from '../helpers/fake-unhcr.js';
-import { errorOf, structuredOf, textOf } from '../helpers/results.js';
+import { errorOf, structuredOf, textOf, unescapeMarkdown } from '../helpers/results.js';
 import { initFakeUpstream } from '../helpers/services.js';
 
 let fake: FakeUnhcr;
@@ -478,16 +478,16 @@ describe('other topics', () => {
       topic: 'regions',
       regions: [
         { id: 5, name: 'Asia and the Pacific', country_count: 3 },
-        { id: 3, name: 'Eastern and Southern Africa', country_count: 0 },
+        { id: 3, name: 'Eastern and Southern Africa', country_count: 1 },
         { id: 7, name: 'Europe', country_count: 5 },
         { id: 1, name: 'Middle East and North Africa', country_count: 7 },
         { id: 6, name: 'The Americas', country_count: 2 },
-        { id: 2, name: 'West and Central Africa', country_count: 0 },
+        { id: 2, name: 'West and Central Africa', country_count: 1 },
       ],
     });
     const text = textOf(result.content);
     expect(text).toContain('| 1 | Middle East and North Africa | 7 |');
-    expect(text).toContain('| 3 | Eastern and Southern Africa | 0 |');
+    expect(text).toContain('| 3 | Eastern and Southern Africa | 1 |');
   });
 
   it('reports each dataset’s span from the data, the footnote span, and the nowcast month', async () => {
@@ -661,6 +661,32 @@ describe('errors', () => {
     expect(text).toContain('Recovery: Wait the retryAfter seconds');
     expect(text).toContain('reason upstream_busy · retryable');
   });
+
+  it.each(['regions', 'countries'] as const)(
+    'fails topic %s on both surfaces while a bureau’s member list stays empty, never reading the bureau as having none',
+    async (topic) => {
+      // Faked timers: the retry backoff runs without a wait.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      try {
+        fake.intercept({
+          endpoint: 'countries',
+          matches: (params) => params.get('unhcr_region') === '7',
+          respond: () => Response.json(envelope([])),
+        });
+        const pending = runToolContract(listReferenceTool, { topic });
+        await vi.advanceTimersByTimeAsync(10_000);
+        const result = await pending;
+        const message = 'UNHCR API returned an empty reference list.';
+        expect(errorOf(result)).toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: expect.stringContaining(message),
+        });
+        expect(unescapeMarkdown(textOf(result.content))).toContain(message);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('rejects an unknown topic and an oversized name_contains as invalid params', async () => {
     const badTopic = await runToolContract(listReferenceTool, {

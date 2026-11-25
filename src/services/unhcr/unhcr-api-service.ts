@@ -377,7 +377,7 @@ export class UnhcrApiService {
             const name = toIdentityText(raw.name);
             if (!Number.isInteger(id) || !name) return [];
             return [
-              this.walk('countries', { unhcrRegion: id }, ctx, deadlineAt).then(
+              this.walk('countries', { unhcrRegion: id }, ctx, deadlineAt, parseReference).then(
                 ({ items: members }): UnhcrRegion => ({
                   id,
                   name,

@@ -339,6 +339,38 @@ export const USA_COUNTRY_ROW: RawRow = country({
   region: 'Northern America',
 });
 
+/**
+ * The recorded `/countries/` row of one member of each bureau that covers none
+ * of {@link COUNTRY_ROWS}, since UNHCR publishes no bureau without members.
+ * Served in the member lists only.
+ */
+const MEMBER_ONLY_ROWS: RawRow[] = [
+  country({
+    id: 36,
+    code: 'CHD',
+    iso: 'TCD',
+    iso2: 'TD',
+    name: 'Chad',
+    nameLong: 'Chad',
+    nameFormal: 'the Republic of Chad',
+    nationality: 'Chadian',
+    majorArea: 'Africa',
+    region: 'Middle Africa',
+  }),
+  country({
+    id: 99,
+    code: 'KEN',
+    iso: 'KEN',
+    iso2: 'KE',
+    name: 'Kenya',
+    nameLong: 'Kenya',
+    nameFormal: 'the Republic of Kenya',
+    nationality: 'Kenyan',
+    majorArea: 'Africa',
+    region: 'Eastern Africa',
+  }),
+];
+
 /** `/regions/` rows, verbatim: six bureaus, ids 1, 2, 3, 5, 6, 7. */
 export const REGION_ROWS: RawRow[] = [
   { '0': 1, id: 5, name: 'Asia and the Pacific', name_fr: 'Asie et Pacifique' },
@@ -350,7 +382,9 @@ export const REGION_ROWS: RawRow[] = [
 ];
 
 const countryByIso = (iso: string): RawRow => {
-  const row = [...COUNTRY_ROWS, USA_COUNTRY_ROW].find((candidate) => candidate.iso === iso);
+  const row = [...COUNTRY_ROWS, USA_COUNTRY_ROW, ...MEMBER_ONLY_ROWS].find(
+    (candidate) => candidate.iso === iso,
+  );
   if (!row) throw new Error(`No country fixture for ${iso}`);
   return row;
 };
@@ -358,8 +392,8 @@ const countryByIso = (iso: string): RawRow => {
 /** `/countries/?unhcr_region=<id>` members, as ISO3 codes (the rows served are country rows). */
 export const REGION_MEMBERS: Record<number, string[]> = {
   1: ['EGY', 'IRQ', 'JOR', 'LBN', 'MAR', 'PSE', 'SYR'],
-  2: [],
-  3: [],
+  2: ['TCD'],
+  3: ['KEN'],
   5: ['AFG', 'AUS', 'JPN'],
   6: ['CUW', 'MTQ'],
   7: ['AUT', 'DEU', 'GBR', 'TUR', 'UKR'],

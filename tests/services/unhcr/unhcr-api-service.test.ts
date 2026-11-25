@@ -736,42 +736,68 @@ describe('reference data', () => {
       vi.useRealTimers();
     });
 
-    const load = {
-      countries: async (service: UnhcrApiService) =>
-        (await service.countries(createMockContext())).list,
-      regions: async (service: UnhcrApiService) =>
-        (await service.regions(createMockContext())).regions,
-      footnotes: (service: UnhcrApiService) => service.footnotes(createMockContext()),
-    };
+    /** Each list by the request that carries it, a load that reads it, and the entries it holds. */
+    const lists: {
+      endpoint: string;
+      entries: number;
+      list: string;
+      load: (service: UnhcrApiService) => Promise<unknown[] | undefined>;
+      matches?: (params: URLSearchParams) => boolean;
+    }[] = [
+      {
+        list: 'countries',
+        endpoint: 'countries',
+        load: async (service) => (await service.countries(createMockContext())).list,
+        entries: 22,
+      },
+      {
+        list: 'regions',
+        endpoint: 'regions',
+        load: async (service) => (await service.regions(createMockContext())).regions,
+        entries: 6,
+      },
+      {
+        list: 'one bureau’s members',
+        endpoint: 'countries',
+        matches: (params) => params.get('unhcr_region') === '7',
+        load: async (service) =>
+          (await service.regions(createMockContext())).regions.find((region) => region.id === 7)
+            ?.countries,
+        entries: 5,
+      },
+      {
+        list: 'footnotes',
+        endpoint: 'footnotes',
+        load: (service) => service.footnotes(createMockContext()),
+        entries: 10,
+      },
+    ];
     const emptyList = () => Response.json({ page: 1, maxPages: 0, items: [] });
 
-    it.each(['countries', 'regions', 'footnotes'] as const)(
-      'is retried for %s',
-      async (endpoint) => {
-        const { fake, service } = setup();
-        fake.intercept({ endpoint, once: true, respond: emptyList });
-        const pending = load[endpoint](service);
-        await vi.advanceTimersByTimeAsync(10_000);
-        expect((await pending).length).toBeGreaterThan(0);
-      },
-    );
+    it.each(lists)('is retried for $list', async ({ endpoint, entries, load, matches }) => {
+      const { fake, service } = setup();
+      fake.intercept({ endpoint, once: true, respond: emptyList, ...(matches && { matches }) });
+      const pending = load(service);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await pending).toHaveLength(entries);
+    });
 
-    it.each(['countries', 'regions', 'footnotes'] as const)(
-      'fails %s after the retries and is not kept for the next call',
-      async (endpoint) => {
+    it.each(lists)(
+      'fails $list after the retries and is not kept for the next call',
+      async ({ endpoint, entries, load, matches }) => {
         const { fake, service } = setup();
         for (let attempt = 0; attempt < 3; attempt++) {
-          fake.intercept({ endpoint, once: true, respond: emptyList });
+          fake.intercept({ endpoint, once: true, respond: emptyList, ...(matches && { matches }) });
         }
-        const failed = expect(load[endpoint](service)).rejects.toMatchObject({
+        const failed = expect(load(service)).rejects.toMatchObject({
           code: JsonRpcErrorCode.ServiceUnavailable,
           message: expect.stringContaining('UNHCR API returned an empty reference list.'),
         });
         await vi.advanceTimersByTimeAsync(10_000);
         await failed;
-        const pending = load[endpoint](service);
+        const pending = load(service);
         await vi.advanceTimersByTimeAsync(10_000);
-        expect((await pending).length).toBeGreaterThan(0);
+        expect(await pending).toHaveLength(entries);
       },
     );
   });
@@ -794,8 +820,10 @@ describe('reference data', () => {
       'TUR',
       'UKR',
     ]);
-    // Two bureaus have no member here, and XXA (stateless) is in none.
+    // XXA (stateless) is in no bureau.
     expect(Object.fromEntries(regionByIso3)).toEqual({
+      TCD: 'West and Central Africa',
+      KEN: 'Eastern and Southern Africa',
       EGY: 'Middle East and North Africa',
       IRQ: 'Middle East and North Africa',
       JOR: 'Middle East and North Africa',
