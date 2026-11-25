@@ -2,7 +2,7 @@
  * @fileoverview Output schema pieces shared by the unhcr_get_* data tools and
  * the markdown renderers for them. Each data tool's row schema starts with the
  * identity fields here; the result carries the shared scope, coverage,
- * staging, notes, and attribution fields.
+ * staging, notes, attribution, and footnote fields.
  * @module mcp-server/tools/shared/outputs
  */
 
@@ -116,7 +116,7 @@ export const datasetSchema = z
     'Present when the full result was staged as a dataframe; read its columns with unhcr_dataframe_describe, then query it with unhcr_dataframe_query.',
   );
 
-export const footnoteSchema = z
+const footnoteSchema = z
   .object({
     text: z.string().describe("UNHCR's caveat text, verbatim."),
     years: z
@@ -167,6 +167,12 @@ export const sharedResultFields = {
     .array(z.string())
     .describe('How to read the counts: stock or flow, rounding, the meaning of null, caveats.'),
   attribution: attributionSchema,
+  footnotes: z
+    .array(footnoteSchema)
+    .describe(
+      'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
+    ),
+  footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
 };
 
 /** Success-path context shared by the data tools, populated through `ctx.enrich`. */
@@ -279,6 +285,31 @@ export function renderFootnotes(footnotes: readonly MatchedFootnote[], total: nu
 /** A list of codes for one table cell; an empty list renders as an em dash. */
 export function codesCell(codes: readonly string[]): string {
   return codes.length > 0 ? cell(codes.join(', ')) : '—';
+}
+
+/** An asylum row's output field listing the codes of one procedure dimension summed into it. */
+export const codesField = (dimension: string, list: string) =>
+  z
+    .array(z.string().describe(`One ${dimension} code.`))
+    .describe(
+      `${list} summed into this row; a single code when split_by keeps ${dimension} separate.`,
+    );
+
+/**
+ * The notice for an asylum result that aggregated to no rows though UNHCR sent
+ * some: each carried a unit code other than P or C, or `filter` matched none.
+ */
+export function asylumEmptyNotice(result: {
+  aggregatedRows: number;
+  fetchedRows: number;
+  filter: string | undefined;
+  skippedRows: number;
+}): string | undefined {
+  const { aggregatedRows, fetchedRows, filter, skippedRows } = result;
+  if (fetchedRows === 0 || aggregatedRows > 0) return;
+  return skippedRows > 0
+    ? `UNHCR returned ${skippedRows} row(s)${filter ? ` matching ${filter}` : ''}, all with a unit code other than P (persons) or C (cases); they were left out rather than guessed.`
+    : `No rows matched ${filter}. Drop the filter or check the codes with unhcr_list_reference (topic asylum_codes).`;
 }
 
 /**

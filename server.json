@@ -64,6 +64,13 @@
           "default": "true"
         },
         {
+          "name": "UNHCR_NORMALIZE_INPUTS",
+          "description": "Reads stages, decision_levels, population_types, and split_by sent as a string as the array of its codes, and split_by in any case. Set to false to reject both.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -126,6 +133,13 @@
         {
           "name": "UNHCR_CLAMP_LIMITS",
           "description": "Serves limit, preview, and row_limit above their cap at the cap, with a notice. Set to false to advertise each cap as a schema maximum and reject a larger value.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
+          "name": "UNHCR_NORMALIZE_INPUTS",
+          "description": "Reads stages, decision_levels, population_types, and split_by sent as a string as the array of its codes, and split_by in any case. Set to false to reject both.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"

@@ -4,7 +4,7 @@ description: Gates for answering displacement and asylum questions with the unhc
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -15,7 +15,7 @@ metadata:
 
 | Identifier | Where it comes from |
 |:--|:--|
-| Country (ISO3) | `unhcr_list_reference` topic `countries` with `name_contains`; `stateless` finds `XXA`, the non-country origin code |
+| Country (ISO3) | `unhcr_list_reference` topic `countries` with `name_contains`; `stateless` finds `XXA`, the non-country origin code. It matches UNHCR's spellings, plus some common English names UNHCR does not use (`turkey`, `ivory coast`, `south korea`, `uk`, `burma`), which return their one country with a notice naming UNHCR's name and the ISO3. Pass the ISO3 to `origin` and `asylum`: a name there fails, and its hint gives the ISO3 when the name is one of those |
 | UNHCR regional bureau | `unhcr_list_reference` topic `regions`. Staged tables carry the same names in `origin_unhcr_region` and `asylum_unhcr_region`, and UN subregions (`Western Europe`, `Western Asia`, …) in `origin_unsd_region` and `asylum_unsd_region`. No column marks the EU or any other bloc |
 | `df_XXXXX_XXXXX` | `dataset.name` on a data result that overflowed `limit` or set `stage`, `nowcast_dataset.name` for the nowcast, or your own `register_as` |
 
@@ -51,6 +51,8 @@ metadata:
 **Solutions columns start in different years, and resettlement has no departure country.** At world level, resettlement runs from 1959, refugee returns from 1965, naturalisation from 1990, and IDP returns from 1997. Earlier years are null, not zero, so start each trend at its column's first non-null year. Resettlement is recorded only against the destination, and first-asylum hosts (Türkiye, Lebanon, Pakistan, Uganda, …) carry null resettlement. No tool says which country refugees were resettled from. The `returned_refugees` and `returned_idps` columns on population rows are the same series as in `unhcr_get_solutions`, so count them once.
 
 **Read a footnote before applying it.** A caveat naming only an asylum country attaches to every origin's row there. Germany's caveat about arrivals from Ukraine, for example, attaches to the Syrian row in Germany. A call returns at most 20 caveats, those on its inline rows first. When `footnotes_total` exceeds the number returned, list the origin and asylum codes of the rows you report, split across calls until each call's `footnotes_total` equals the number it returns: at end-2025 the top 30 Syrian hosts carry 17 caveats, the top 60 carry 26.
+
+**Read the footnotes before comparing asylum years.** `unhcr_get_asylum_applications` and `unhcr_get_asylum_decisions` return `footnotes` like the other data tools, and their `data_notes` call every row a calendar-year flow, which a footnote can narrow. UNHCR's caveat on the United States' 2024 applications and decisions limits them to January–June, so 2023 to 2024 is not a like-for-like fall. Every asylum row can carry a caveat whatever its counts, a zero included. A year with no row carries no caveat: an absent year has nothing to attach one to, so a gap in a series is not a clean year.
 
 ## Workflows
 

@@ -210,12 +210,29 @@ function parseEnvelope(body: string): Envelope {
   };
 }
 
-/** Race a shared promise against one caller's cancellation. */
+/**
+ * {@link parseEnvelope} for a list UNHCR never publishes empty. An empty one is
+ * the same transient fault as a missing `items`: read as "there are none", it
+ * would stand for the reference data's whole 24 h.
+ */
+function parseReference(body: string): Envelope {
+  const envelope = parseEnvelope(body);
+  if (envelope.items.length === 0) {
+    throw serviceUnavailable('UNHCR API returned an empty reference list.');
+  }
+  return envelope;
+}
+
+/**
+ * Race a shared promise against one caller's cancellation. A caller already
+ * cancelled still subscribes to `work`, so its failure is never an unhandled
+ * rejection, which ends the process.
+ */
 function raceSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
     work.then(
       (value) => {
         signal.removeEventListener('abort', onAbort);
@@ -338,7 +355,7 @@ export class UnhcrApiService {
   countries(ctx: Context, options?: CallOptions): Promise<CountryReference> {
     return this.run(ctx, options, (deadlineAt) =>
       this.reference('countries', async () => {
-        const { items } = await this.walk('countries', {}, ctx, deadlineAt);
+        const { items } = await this.walk('countries', {}, ctx, deadlineAt, parseReference);
         const list = items.flatMap((raw) => toCountry(raw) ?? []);
         return { list, table: buildCountryTable(list) };
       }),
@@ -353,7 +370,7 @@ export class UnhcrApiService {
   regions(ctx: Context, options?: CallOptions): Promise<RegionReference> {
     return this.run(ctx, options, (deadlineAt) =>
       this.reference('regions', async () => {
-        const { items } = await this.walk('regions', {}, ctx, deadlineAt);
+        const { items } = await this.walk('regions', {}, ctx, deadlineAt, parseReference);
         const regions = await Promise.all(
           items.flatMap((raw) => {
             const id = Number(raw.id);
@@ -426,11 +443,11 @@ export class UnhcrApiService {
     );
   }
 
-  /** All of UNHCR's footnotes (658 at last count), parsed and cached 24 h. */
+  /** All of UNHCR's footnotes, parsed and cached 24 h. */
   footnotes(ctx: Context, options?: CallOptions): Promise<Footnote[]> {
     return this.run(ctx, options, (deadlineAt) =>
       this.reference('footnotes', async () => {
-        const { items } = await this.walk('footnotes', {}, ctx, deadlineAt);
+        const { items } = await this.walk('footnotes', {}, ctx, deadlineAt, parseReference);
         return items.map(toFootnote).filter((note) => note.text !== '');
       }),
     );
@@ -663,9 +680,10 @@ export class UnhcrApiService {
     params: RequestParams,
     ctx: Context,
     deadlineAt: number,
+    parse = parseEnvelope,
   ): Promise<{ complete: boolean; items: RawRow[] }> {
     const url = (page: number) => buildUrl(endpoint, { ...params, limit: PAGE_SIZE, page });
-    const first = await this.page(url(1), ctx, deadlineAt);
+    const first = await this.page(url(1), ctx, deadlineAt, parse);
     const pageCap = Math.ceil(this.config.maxRows / PAGE_SIZE);
     const lastPage = Math.min(first.maxPages, pageCap);
     const rest = await Promise.all(
@@ -681,12 +699,17 @@ export class UnhcrApiService {
   }
 
   /** One page: from the cache, from an identical request already in flight, or fetched. */
-  private page(url: string, ctx: Context, deadlineAt: number): Promise<Envelope> {
+  private page(
+    url: string,
+    ctx: Context,
+    deadlineAt: number,
+    parse = parseEnvelope,
+  ): Promise<Envelope> {
     const cached = this.cache.get(url);
-    if (cached !== undefined) return Promise.resolve(parseEnvelope(cached));
+    if (cached !== undefined) return Promise.resolve(parse(cached));
     let shared = this.inflight.get(url);
     if (!shared) {
-      shared = this.load(url, ctx, deadlineAt).finally(() => this.inflight.delete(url));
+      shared = this.load(url, ctx, deadlineAt, parse).finally(() => this.inflight.delete(url));
       this.inflight.set(url, shared);
     }
     return shared;
@@ -697,7 +720,12 @@ export class UnhcrApiService {
    * through the pacer. Runs under the first caller's deadline and never under
    * any caller's signal, so one caller cancelling cannot fail another.
    */
-  private load(url: string, ctx: Context, deadlineAt: number): Promise<Envelope> {
+  private load(
+    url: string,
+    ctx: Context,
+    deadlineAt: number,
+    parse: typeof parseEnvelope,
+  ): Promise<Envelope> {
     const budget = deadlineAt - Date.now();
     if (budget <= 0) return Promise.reject(deadlineExceeded(this.config.cacheMaxBytes));
     return withRetry(
@@ -706,7 +734,7 @@ export class UnhcrApiService {
           signal,
           maxWaitMs: Math.max(0, deadlineAt - Date.now()),
         });
-        const envelope = parseEnvelope(body);
+        const envelope = parse(body);
         this.cache.set(url, body);
         return envelope;
       },

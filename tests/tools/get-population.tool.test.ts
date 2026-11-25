@@ -29,6 +29,7 @@ import { TERMS_URL } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import {
   companionRow,
+  envelope,
   FOOTNOTE_ROWS,
   footnoteRow,
   IDMC_ROWS,
@@ -36,6 +37,7 @@ import {
   NOWCAST_ROWS,
   POPULATION_ROWS,
   populationRow,
+  REGION_ROWS,
   UNRWA_ROWS,
 } from '../fixtures/unhcr.js';
 import { carryDataframeState, flowContext } from '../helpers/dataframes.js';
@@ -527,14 +529,28 @@ describe('declared errors, by reason', () => {
     });
   });
 
-  it('refuses UK and names GBR for the United Kingdom', async () => {
-    const result = await runToolContract(getPopulationTool, { asylum: 'uk' });
-    const error = errorOf(result);
-    expect(error.data?.reason).toBe('unknown_country_code');
-    expect(error.data?.recovery?.hint).toBe(
-      'UK is not an ISO country code; the United Kingdom is GBR.',
-    );
-  });
+  it.each([
+    [
+      'uk',
+      'UK',
+      'UK is not an ISO country code; United Kingdom of Great Britain and Northern Ireland is GBR.',
+    ],
+    ['Turkey', 'TURKEY', 'TURKEY is not an ISO country code; Türkiye is TUR.'],
+  ])(
+    'refuses the common name %s and names its ISO3 on both surfaces',
+    async (asylum, code, hint) => {
+      const result = await runToolContract(getPopulationTool, { asylum });
+      const error = errorOf(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(`Not an ISO3 code in UNHCR's country list: asylum ${code}.`);
+      expect(error.data).toMatchObject({
+        reason: 'unknown_country_code',
+        codes: [code],
+        recovery: { hint },
+      });
+      expect(textOf(result.content)).toContain(`Recovery: ${hint}`);
+    },
+  );
 
   it('combines exact suggestions with routing for codes it cannot suggest', async () => {
     const result = await runToolContract(getPopulationTool, {
@@ -1481,6 +1497,20 @@ describe('staging', () => {
     );
   });
 
+  it('neither truncates nor stages a result that exactly fills the limit, on both surfaces', async () => {
+    const result = await runToolContract(getPopulationTool, { ...syrPairs2025, limit: 5 });
+    const structured = structuredOf(result);
+    expect(structured.total_rows).toBe(5);
+    expect(structured.rows).toHaveLength(5);
+    for (const field of ['truncated', 'shown', 'cap', 'dataset', 'notice']) {
+      expect(structured, field).not.toHaveProperty(field);
+    }
+    const text = textOf(result.content);
+    expect(text).toContain('**Rows:** 5 shown of 5 total');
+    expect(text).not.toContain('**truncated:**');
+    expect(text).not.toContain('**Dataset:**');
+  });
+
   it('never stages an empty result, even on request', async () => {
     const result = await call({ origin: 'SYR', asylum: 'JPN', stage: true });
     expect(result).not.toHaveProperty('dataset');
@@ -1544,6 +1574,27 @@ describe('staging', () => {
       }),
     );
     expect(getCanvasBridge()?.available).toBe(true);
+  });
+
+  it('rejects with the caller’s own cancellation while it stages, never succeeding without a dataset', async () => {
+    const controller = new AbortController();
+    fake.intercept({
+      endpoint: 'regions',
+      respond: () => {
+        controller.abort(new DOMException('caller went away', 'AbortError'));
+        return Response.json(envelope(REGION_ROWS));
+      },
+    });
+    // The handler itself: the framework settles any aborted call as cancelled, whatever it returned.
+    const pending = call(
+      { ...syrPairs2025, limit: 2 },
+      createMockContext({ errors: getPopulationTool.errors, signal: controller.signal }),
+    );
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'caller went away',
+    });
+    expect(fake.urlsFor('regions')).toHaveLength(1);
   });
 });
 

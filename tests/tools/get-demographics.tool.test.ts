@@ -365,6 +365,30 @@ describe('population_types and footnotes', () => {
     expect(dataRequests()[0]?.searchParams.has('columns')).toBe(false);
   });
 
+  it('reads population_types sent as a string as the array of its codes, on both surfaces', async () => {
+    const string = await runToolContract(getDemographicsTool, {
+      ...syr2025,
+      population_types: 'ref, Asy' as unknown as [],
+    });
+    const rows = structuredOf(string).rows as { population_type: string }[];
+    expect(rows.map((row) => row.population_type)).toEqual(['REF', 'ASY']);
+    expect(textOf(string.content)).toContain('| ASY Asylum-seekers | ');
+    expect(string).toEqual(
+      await runToolContract(getDemographicsTool, { ...syr2025, population_types: ['REF', 'ASY'] }),
+    );
+  });
+
+  it('logs population_types sent as a string under this tool’s name', async () => {
+    const ctx = context();
+    await call({ ...syr2025, population_types: 'ref' as unknown as [] }, ctx);
+    const lines = (ctx.log as MockContextLogger).calls.filter(
+      (line) => line.msg === 'List input normalized',
+    );
+    expect(lines.map((line) => line.data)).toEqual([
+      { tool: 'unhcr_get_demographics', field: 'population_types', effective: ['REF'] },
+    ]);
+  });
+
   it('gives the filter its own notice when it empties rows UNHCR returned', async () => {
     const result = await runToolContract(getDemographicsTool, {
       ...syr2025,
@@ -543,7 +567,7 @@ describe('population_types and footnotes', () => {
   });
 
   it('treats blank and empty filters as unset', async () => {
-    for (const population_types of ['', '  ', []] as unknown as Input['population_types'][]) {
+    for (const population_types of ['', '  ', ',', []] as unknown as Input['population_types'][]) {
       const result = await call({ ...syr2025, population_types });
       expect(result.total_rows).toBe(7);
     }
@@ -553,7 +577,7 @@ describe('population_types and footnotes', () => {
     ['a type folded into another column', ['ROC']],
     ['a type demographics does not break down', ['RST']],
     ['an unknown code', ['XYZ']],
-    ['a bare string', 'REF'],
+    ['a string with an unknown code', 'REF,XYZ'],
   ])('rejects %s as invalid params before any upstream request', async (_label, types) => {
     const result = await runToolContract(getDemographicsTool, {
       ...syr2025,

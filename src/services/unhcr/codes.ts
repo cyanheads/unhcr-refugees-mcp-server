@@ -309,7 +309,7 @@ export const DATASETS: readonly DatasetInfo[] = [
     endpoint: 'footnotes',
     tool: 'unhcr_get_population',
     measure: null,
-    note: 'UNHCR’s per-country data caveats, attached to unhcr_get_population, unhcr_get_demographics, and unhcr_get_solutions results.',
+    note: 'UNHCR’s per-country data caveats, attached to the results of every unhcr_get_* tool.',
   },
 ];
 

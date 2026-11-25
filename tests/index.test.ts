@@ -6,16 +6,16 @@
  * stateless session posture, the server instructions, and the setup and
  * teardown hooks that build and release the services, with dataframe listing
  * off for an unauthenticated HTTP deployment. The entry point reads
- * `.env` from the working directory, so every import runs from a temporary
- * directory the test controls; the `.env` cases cover the dataframe default,
- * the drop flag, `UNHCR_CLAMP_LIMITS`, and the canvas row cap reaching the
- * tool schemas.
+ * `.env` from the working directory, so every import resolves it against a
+ * temporary directory the test controls; the `.env` cases cover the dataframe default,
+ * the drop flag, `UNHCR_CLAMP_LIMITS`, `UNHCR_NORMALIZE_INPUTS`, and the canvas
+ * row cap reaching the tool schemas.
  * @module tests/index.test
  */
 
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { type createApp as CreateApp, z } from '@cyanheads/mcp-ts-core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -32,7 +32,6 @@ vi.mock('@cyanheads/mcp-ts-core', async (importOriginal) => ({
 
 type AppOptions = NonNullable<Parameters<typeof CreateApp>[0]>;
 
-const originalCwd = process.cwd();
 const tempDirs: string[] = [];
 
 /** A fresh, empty working directory. */
@@ -42,14 +41,21 @@ const tempDir = () => {
   return dir;
 };
 
-/** Import the entry point from `cwd` and return the options it passed to `createApp()`. */
+/**
+ * Import the entry point with `cwd` as the directory `process.loadEnvFile()` resolves against, and
+ * return the options it passed to `createApp()`. The resolution is substituted, not the load, because
+ * worker threads refuse `process.chdir()`.
+ */
 async function importEntry(cwd: string): Promise<AppOptions> {
   createApp.mockClear();
-  process.chdir(cwd);
+  const loadEnvFile = process.loadEnvFile.bind(process);
+  const fromCwd = vi
+    .spyOn(process, 'loadEnvFile')
+    .mockImplementation((path = '.env') => loadEnvFile(resolve(cwd, String(path))));
   try {
     await import('@/index.js');
   } finally {
-    process.chdir(originalCwd);
+    fromCwd.mockRestore();
   }
   expect(createApp).toHaveBeenCalledTimes(1);
   return createApp.mock.calls[0]?.[0] as AppOptions;
@@ -114,7 +120,7 @@ describe('createApp options', () => {
     ].map((match) => match[1]);
     expect(pointed).toEqual(['unhcr-refugees-guide']);
     for (const name of pointed) {
-      expect(existsSync(join(originalCwd, 'skills', name ?? '', 'SKILL.md')), name).toBe(true);
+      expect(existsSync(join('skills', name ?? '', 'SKILL.md')), name).toBe(true);
     }
   });
 });
@@ -206,6 +212,7 @@ describe('.env in the working directory', () => {
     'CANVAS_DEFAULT_ROW_LIMIT',
     'UNHCR_CLAMP_LIMITS',
     'UNHCR_DATAFRAME_DROP_ENABLED',
+    'UNHCR_NORMALIZE_INPUTS',
   ] as const;
   const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -267,6 +274,23 @@ describe('.env in the working directory', () => {
     });
     expect(loaded.instructions).toContain('a count above its cap is rejected');
   });
+
+  it.each([
+    ['', true],
+    ['UNHCR_NORMALIZE_INPUTS=false\n', false],
+  ])(
+    'reads a list sent as a string unless .env (%j) turns normalization off',
+    async (env, read) => {
+      const dir = tempDir();
+      writeFileSync(join(dir, '.env'), env);
+      const loaded = await importEntry(dir);
+      const decisions = loaded.tools?.find((tool) => tool.name === 'unhcr_get_asylum_decisions');
+      for (const input of [{ decision_levels: 'FI' }, { split_by: ['Authority'] }]) {
+        expect(decisions!.input.safeParse(input).success, JSON.stringify(input)).toBe(read);
+      }
+      expect(decisions!.input.safeParse({ decision_levels: ['FI'] }).success).toBe(true);
+    },
+  );
 
   it('carries CANVAS_DEFAULT_ROW_LIMIT into the row_limit default', async () => {
     const dir = tempDir();

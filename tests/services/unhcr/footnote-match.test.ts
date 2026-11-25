@@ -2,13 +2,15 @@
  * @fileoverview Tests for footnote parsing and local matching over
  * recorded-shape `/footnotes/` rows: year specs (single, range, list), blank
  * country columns, per-row population-type overlap (each row carries its own
- * types, with the folded ones and only the nonzero count columns), the
- * summed-dimension rule, the ranking against the inline cut, and the cap.
+ * types, with the folded ones and only the nonzero count columns; an asylum
+ * row carries ASY whatever its count), the summed-dimension rule, the ranking
+ * against the inline cut, and the cap.
  * @module tests/services/unhcr/footnote-match.test
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  asylumRowTypes,
   FOOTNOTE_CAP,
   type Footnote,
   type FootnoteRowKey,
@@ -188,6 +190,28 @@ describe('typesWithCounts', () => {
 
   it('carries no type for a row whose counts are all null or zero', () => {
     expect(typesWithCounts({ year: 2024, refugees: 0, idps: null, unrwa_refugees: 5 })).toEqual([]);
+  });
+});
+
+describe('asylumRowTypes', () => {
+  it('attaches an ASY caveat to every asylum row, whatever its count, and no other type’s', () => {
+    const others = 'REF,ROC,OIP,IDP,IOC,STA,OOC,HST,RST,NAT,RET,RDP';
+    const notes = [...others.split(','), others, 'ASY', 'REF,ASY']
+      .map((type) => note({ footnote: type, population_type: type }))
+      .map(toFootnote);
+    const asylumRow = (applied: number | null) => ({
+      year: 2024,
+      origin_iso3: 'SYR',
+      asylum_iso3: 'DEU',
+      applied,
+    });
+    const rows = [asylumRow(76_765), asylumRow(0), asylumRow(null)];
+    const result = matchFootnotes(notes, rows, asylumRowTypes, rows.length);
+    expect(result.footnotes.map((m) => [m.text, m.rows_matched])).toEqual([
+      ['ASY', 3],
+      ['REF,ASY', 3],
+    ]);
+    expect(result.total).toBe(2);
   });
 });
 

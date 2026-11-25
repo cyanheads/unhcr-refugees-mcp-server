@@ -1,8 +1,8 @@
 /**
  * @fileoverview Test wiring for the two service seams the design's Test
  * Boundary names: `UnhcrApiService` built over the fake upstream's `fetch`,
- * and `CanvasBridge` over a real in-memory DuckDB `DataCanvas` (or a stub
- * whose `acquire` fails, for the binding-load latch).
+ * and `CanvasBridge` over a real in-memory DuckDB `DataCanvas` (or one whose
+ * mint fails, for the binding-load latch).
  * @module tests/helpers/services
  */
 
@@ -64,19 +64,16 @@ export async function shutdownCanvas(canvas: DataCanvas): Promise<void> {
 }
 
 /**
- * A `DataCanvas` whose `acquire` fails the way the framework's lazy DuckDB load
- * does when the native binding is absent (`ConfigurationError`), or with any
- * other error when one is given.
+ * A `DataCanvas` whose every mint fails the way the framework's lazy DuckDB
+ * load does when the native binding is absent (`ConfigurationError`), or with
+ * any other error when one is given. `acquireShared` is a spy on the real one.
  */
-export function createFailingCanvas(error?: Error) {
-  const acquire = vi.fn(() =>
-    Promise.reject(
-      error ??
-        configurationError(
-          'Install "@duckdb/node-api" to use the DuckDB canvas provider: bun add @duckdb/node-api',
-        ),
-    ),
-  );
-  const canvas: Pick<DataCanvas, 'acquire'> = { acquire };
-  return { acquire, canvas: canvas as DataCanvas };
+export function createFailingCanvas(
+  error: Error = configurationError(
+    'Install "@duckdb/node-api" to use the DuckDB canvas provider: bun add @duckdb/node-api',
+  ),
+) {
+  const canvas = createTestCanvas();
+  vi.spyOn(canvas.getProvider(), 'initCanvas').mockRejectedValue(error);
+  return { acquireShared: vi.spyOn(canvas, 'acquireShared'), canvas };
 }

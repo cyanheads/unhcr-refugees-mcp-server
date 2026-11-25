@@ -134,6 +134,7 @@ describe('DATASETS', () => {
     expect(byDataset.get('footnotes')).toMatchObject({
       tool: 'unhcr_get_population',
       measure: null,
+      note: 'UNHCR’s per-country data caveats, attached to the results of every unhcr_get_* tool.',
     });
   });
 

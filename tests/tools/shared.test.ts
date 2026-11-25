@@ -1,9 +1,11 @@
 /**
  * @fileoverview Tests for the shared tool helpers: the blank-as-unset and
  * code-list input pieces, markdown escaping for upstream text and caller
- * input, number rendering, the asylum code cells and legend, the sort applied
- * before the inline cut, attribution, and the count inputs: their schema in
- * both clamp modes, and the clamp's notice, log line, and counter.
+ * input, number rendering, the asylum code cells and legend, the footnote
+ * fields every data tool shares, the sort applied before the inline cut,
+ * attribution, the count inputs — their schema in both clamp modes, and the
+ * clamp's notice, log line, and counter — and the log line and counter each
+ * normalized list input of a served call gets.
  * @module tests/tools/shared.test
  */
 
@@ -12,9 +14,11 @@ import {
   createMockContext,
   getEnrichment,
   type MockContextLogger,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { ATTR_MCP_TOOL_NAME } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getAsylumDecisionsTool } from '@/mcp-server/tools/definitions/get-asylum-decisions.tool.js';
 import { clampCount, countSchema } from '@/mcp-server/tools/shared/counts.js';
 import {
   blankAsUnset,
@@ -37,6 +41,7 @@ import {
   countryCell,
   renderAsylumLegend,
   renderFootnotes,
+  sharedResultFields,
 } from '@/mcp-server/tools/shared/outputs.js';
 import { buildAttribution, finishRows, sortRows } from '@/mcp-server/tools/shared/results.js';
 import {
@@ -48,17 +53,31 @@ import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { asylumCodeLabel } from '@/services/unhcr/codes.js';
 import type { RowIdentity } from '@/services/unhcr/types.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { structuredOf } from '../helpers/results.js';
 import { createFailingCanvas, initFakeUpstream } from '../helpers/services.js';
 
-/** Every counter the helpers create; only the count clamp creates one. */
-const counter = vi.hoisted(() => ({ add: vi.fn() }));
+/** Every counter the helpers create at import: its arguments, and its `add` by counter name. */
+const createdCounters = vi.hoisted((): unknown[][] => []);
+const counters = vi.hoisted(() => new Map<unknown, ReturnType<typeof vi.fn>>());
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
-  createCounter: () => counter,
+  createCounter: (...args: unknown[]) => {
+    const add = vi.fn();
+    createdCounters.push(args);
+    counters.set(args[0], add);
+    return { add };
+  },
 }));
 
+/** The `add` spy of one created counter. */
+const counterAdd = (name: string) => {
+  const add = counters.get(name);
+  if (!add) throw new Error(`No counter named ${name} was created`);
+  return add;
+};
+
 describe('input helpers', () => {
-  const stages = codeList(['N', 'R', 'A'] as const, 'A stage code.');
+  const stages = codeList(['N', 'R', 'A'] as const, 'A stage code.', true);
 
   it('trims and uppercases each code before the enum check', () => {
     expect(stages.parse([' n', 'a ', 'R'])).toEqual(['N', 'A', 'R']);
@@ -71,10 +90,26 @@ describe('input helpers', () => {
     expect(stages.parse([])).toEqual([]);
   });
 
-  it('rejects a code outside the list, a non-string entry, and a bare string', () => {
-    for (const bad of [['X'], ['N', 'RA'], [1], 'N']) {
+  it('rejects a code outside the list and a non-string entry, in an array or a string', () => {
+    for (const bad of [['X'], ['N', 'RA'], [1], 'X', 'N,RA', 1]) {
       expect(stages.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
     }
+  });
+
+  it('reads a string of codes only when normalizing', () => {
+    const strict = codeList(['N', 'R', 'A'] as const, 'A stage code.', false);
+    expect(stages.parse('n, a')).toEqual(['N', 'A']);
+    expect(strict.safeParse('n, a').success).toBe(false);
+    expect(strict.parse(['n', 'a'])).toEqual(['N', 'A']);
+  });
+
+  it('reads a string holding a [ past its start as a list, rejected at the code that holds it', () => {
+    expect(stages.safeParse('N,[R]').error?.issues).toEqual([
+      expect.objectContaining({
+        path: [1],
+        message: 'Invalid option: expected one of "N"|"R"|"A"',
+      }),
+    ]);
   });
 
   it('caps a code-list filter at one entry per code in its list', () => {
@@ -257,6 +292,24 @@ describe('markdown helpers', () => {
   });
 });
 
+describe('sharedResultFields', () => {
+  it('requires footnotes and footnotes_total of every data tool, the last of the shared fields', () => {
+    const schema = z.toJSONSchema(z.object(sharedResultFields));
+    expect(schema.required?.slice(-2)).toEqual(['footnotes', 'footnotes_total']);
+    expect(schema.properties).toMatchObject({
+      footnotes: {
+        type: 'array',
+        description:
+          'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
+      },
+      footnotes_total: {
+        type: 'integer',
+        description: 'Caveats matching the full result, before the cap.',
+      },
+    });
+  });
+});
+
 describe('sortRows', () => {
   type Row = RowIdentity & { refugees: number | null };
   const row = (
@@ -336,9 +389,10 @@ describe('buildAttribution', () => {
 
 describe('count inputs', () => {
   const jsonSchema = (schema: z.ZodType) => z.toJSONSchema(schema, { io: 'input' });
+  const counted = () => counterAdd('unhcr.count_input.clamped');
 
   beforeEach(() => {
-    counter.add.mockClear();
+    counted().mockClear();
   });
 
   it('advertises no maximum when clamping, keeping integer and rejecting fractions and values below the minimum', () => {
@@ -373,7 +427,7 @@ describe('count inputs', () => {
       });
       expect(clamp).toEqual({ effective: requested });
       expect((ctx.log as MockContextLogger).calls).toEqual([]);
-      expect(counter.add).not.toHaveBeenCalled();
+      expect(counted()).not.toHaveBeenCalled();
     },
   );
 
@@ -398,13 +452,162 @@ describe('count inputs', () => {
           data: { tool: 'unhcr_get_population', field: 'limit', requested, effective: 2_000 },
         },
       ]);
-      expect(counter.add).toHaveBeenCalledOnce();
-      expect(counter.add).toHaveBeenCalledWith(1, {
+      expect(counted()).toHaveBeenCalledOnce();
+      expect(counted()).toHaveBeenCalledWith(1, {
         [ATTR_MCP_TOOL_NAME]: 'unhcr_get_population',
         'unhcr.count_input.field': 'limit',
       });
     },
   );
+
+  it('creates the clamp counter once, by its name and unit, however many clamps it records', () => {
+    const clamp = () =>
+      clampCount(createMockContext(), { tool: 't', field: 'limit', requested: 2, cap: 1 });
+    clamp();
+    clamp();
+    expect(createdCounters.filter(([name]) => name === 'unhcr.count_input.clamped')).toEqual([
+      [
+        'unhcr.count_input.clamped',
+        'Count inputs served at their cap because the caller asked for more',
+        '{call}',
+      ],
+    ]);
+    expect(counted()).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('normalized list inputs', () => {
+  const TOOL = 'unhcr_get_asylum_decisions';
+  const counted = () => counterAdd('unhcr.list_input.normalized');
+
+  beforeEach(() => {
+    initFakeUpstream();
+    initCanvasBridge(undefined);
+    counted().mockClear();
+  });
+
+  afterEach(() => {
+    disposeUnhcrService();
+  });
+
+  /** One decisions call through the argument parse a client's call takes, with every list line it logged. */
+  const call = async (args: Record<string, unknown>) => {
+    const logs: MockContextLogger[] = [];
+    const result = await runToolContract(
+      {
+        ...getAsylumDecisionsTool,
+        handler: (...handled: Parameters<typeof getAsylumDecisionsTool.handler>) => {
+          logs.push(handled[1].log as MockContextLogger);
+          return getAsylumDecisionsTool.handler(...handled);
+        },
+      },
+      { origin: 'SYR', asylum: 'DEU', ...args } as z.input<typeof getAsylumDecisionsTool.input>,
+    );
+    const lines = logs
+      .flatMap((log) => log.calls)
+      .filter((line) => line.msg === 'List input normalized');
+    return { lines, result };
+  };
+
+  it.each<[args: Record<string, unknown>, lists: Record<string, string[]>]>([
+    [{ decision_levels: 'FI' }, { decision_levels: ['FI'] }],
+    [{ decision_levels: 'fi, ra' }, { decision_levels: ['FI', 'RA'] }],
+    [{ split_by: 'decision_level' }, { split_by: ['decision_level'] }],
+    [{ split_by: ['AUTHORITY'] }, { split_by: ['authority'] }],
+    [{ split_by: '["AUTHORITY"]' }, { split_by: ['authority'] }],
+    [
+      { decision_levels: 'FI', split_by: 'Authority' },
+      { decision_levels: ['FI'], split_by: ['authority'] },
+    ],
+    // The framework parses these again to repair another argument; the list still counts once.
+    [{ decision_levels: 'FI', split_by: '["authority"]' }, { decision_levels: ['FI'] }],
+    [
+      { decision_levels: 'FI', split_by: '["Authority"]' },
+      { decision_levels: ['FI'], split_by: ['authority'] },
+    ],
+  ])('logs and counts each list %j rewrites once', async (args, lists) => {
+    const { lines, result } = await call(args);
+    expect(result.isError).not.toBe(true);
+    const fields = Object.entries(lists);
+    expect(lines).toHaveLength(fields.length);
+    expect(counted()).toHaveBeenCalledTimes(fields.length);
+    for (const [field, effective] of fields) {
+      expect(lines).toContainEqual({
+        level: 'info',
+        msg: 'List input normalized',
+        data: { tool: TOOL, field, effective },
+      });
+      expect(counted()).toHaveBeenCalledWith(1, {
+        [ATTR_MCP_TOOL_NAME]: TOOL,
+        'unhcr.list_input.field': field,
+      });
+    }
+  });
+
+  it('logs and counts the list of a served call with no rows once', async () => {
+    const { lines, result } = await call({ decision_levels: 'EO' });
+    expect(structuredOf(result)).toMatchObject({ rows: [], total_rows: 0 });
+    expect(lines).toEqual([
+      {
+        level: 'info',
+        msg: 'List input normalized',
+        data: { tool: TOOL, field: 'decision_levels', effective: ['EO'] },
+      },
+    ]);
+    expect(counted().mock.calls).toEqual([
+      [1, { [ATTR_MCP_TOOL_NAME]: TOOL, 'unhcr.list_input.field': 'decision_levels' }],
+    ]);
+  });
+
+  it.each<Record<string, unknown>>([
+    {},
+    { decision_levels: ['FI'], split_by: ['authority'] },
+    { decision_levels: ['fi'] },
+    { decision_levels: '["FI"]', split_by: '["authority"]' },
+    { decision_levels: '["fi"]' },
+    { decision_levels: '', split_by: '' },
+    { decision_levels: ',' },
+    { decision_levels: '[]', split_by: '[]' },
+    { decision_levels: null, split_by: null },
+  ])('logs and counts nothing for %j, which rewrites no list', async (args) => {
+    const { lines, result } = await call(args);
+    expect(result.isError).not.toBe(true);
+    expect(lines).toEqual([]);
+    expect(counted()).not.toHaveBeenCalled();
+  });
+
+  it.each<Record<string, unknown>>([
+    { decision_levels: 'FI,ZZ' },
+    { decision_levels: 'FI', split_by: ',' },
+    { decision_levels: 'FI', split_by: 'none' },
+    { decision_levels: 'FI', limit: 'x' },
+    { decision_levels: 'FI', origin: 'ZZZ' },
+    { decision_levels: 'FI', year_from: 2025, year_to: 2024 },
+  ])('logs and counts nothing for %j, a rejected call', async (args) => {
+    const { lines, result } = await call(args);
+    expect(result.isError).toBe(true);
+    expect(lines).toEqual([]);
+    expect(counted()).not.toHaveBeenCalled();
+  });
+
+  it('carries nothing from one call into the next', async () => {
+    await call({ decision_levels: 'FI', limit: 'x' });
+    await call({ decision_levels: 'FI' });
+    expect(counted()).toHaveBeenCalledTimes(1);
+    const { lines } = await call({ decision_levels: ['FI'] });
+    expect(lines).toEqual([]);
+    expect(counted()).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates the list counter once, by its name and unit', () => {
+    expect(createdCounters.filter(([name]) => name === 'unhcr.list_input.normalized')).toEqual([
+      [
+        'unhcr.list_input.normalized',
+        'Code-list inputs served from a string, or from entries in another case',
+        '{list}',
+      ],
+    ]);
+  });
 });
 
 describe('finishRows levers at the limit cap', () => {

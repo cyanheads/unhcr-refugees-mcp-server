@@ -64,9 +64,9 @@ Dataframes run on DuckDB's native binding, which the npm and Docker installs car
 
 The five `unhcr_get_*` tools share one contract:
 
-- **Scope:** `origin` and `asylum` take ISO3 codes, case-insensitive, as a string or a list, up to 250 distinct codes each, enough to list every country. ISO2 codes are rewritten to ISO3; UNHCR's own codes and country names are rejected. Each listed code returns its own rows, and an omitted dimension is summed into one row unless `expand` (`origin`, `asylum`, or `both`) lists every country. `year_from` / `year_to` default to the dataset's span and are clamped to it.
+- **Scope:** `origin` and `asylum` take ISO3 codes, case-insensitive, as a string or a list, up to 250 distinct codes each, enough to list every country. ISO2 codes are rewritten to ISO3; UNHCR's own codes and country names are rejected, with the exact ISO3 in the hint for a UNHCR code or a common name such as `Turkey` or `UK`. Each listed code returns its own rows, and an omitted dimension is summed into one row unless `expand` (`origin`, `asylum`, or `both`) lists every country. `year_from` / `year_to` default to the dataset's span and are clamped to it.
 - **Rows:** the full result is sorted by `sort_by`, then cut to `limit` (default 25, cap 2,000). A larger `limit` is served at 2,000 with a notice naming the requested and effective values, even for an empty or small result; with `UNHCR_CLAMP_LIMITS=false` it is rejected instead. Where dataframes are on, the full set of a larger result is staged, and `stage: true` stages a result that fits too.
-- **Output:** `total_rows`, `complete` (false when `UNHCR_MAX_ROWS` stopped the fetch), `measure` (`stock` or `flow`), `applied_scope`, `latest_year`, `dataset` when staged, `data_notes`, and `attribution`.
+- **Output:** `total_rows`, `complete` (false when `UNHCR_MAX_ROWS` stopped the fetch), `measure` (`stock` or `flow`), `applied_scope`, `latest_year`, `dataset` when staged, `data_notes`, `footnotes` (UNHCR's matching caveats, up to 20) with `footnotes_total`, and `attribution`.
 - **Errors:** `unknown_country_code`, `invalid_year_window`, `year_out_of_coverage`, `conflicting_scope`, `too_many_country_codes`, and the retryable `upstream_busy`, which carries `retryAfter`.
 
 ---
@@ -74,6 +74,7 @@ The five `unhcr_get_*` tools share one contract:
 ### `unhcr_list_reference` <sub>tool</sub>
 
 - `topic`: `countries`, `regions`, `coverage`, `population_types`, or `asylum_codes`. With `countries`, `name_contains` keeps countries whose names contain every word given, or whose ISO3, ISO2, or UNHCR code equals one; there is no fuzzy matching
+- Some common English names UNHCR does not use (`turkey`, `ivory coast`, `south korea`, `uk`, `burma`) return just their country when given alone, with a notice naming UNHCR's name and the ISO3 (`Read "turkey" as Türkiye (ISO3 TUR), UNHCR's name for the country.`). A period between two single characters joins (`U.K.` reads `uk`); any other period is a space. Initials that match nothing as one word match letter by letter (`F.R. Germany`)
 - `coverage` gives each dataset's `first_year`, `latest_year`, and `measure`, plus the month of the current `nowcast`
 - Countries, regions, and coverage come from the live API and are cached for 24 hours; population types and asylum codes are static, and asylum codes UNHCR's methodology does not define carry `documented: false`
 
@@ -89,7 +90,7 @@ The five `unhcr_get_*` tools share one contract:
 
 ### `unhcr_get_demographics` <sub>tool</sub>
 
-- `population_types` filters to `REF`, `ASY`, `OIP`, `IDP`, `STA`, `OOC`, `HST`, `RET`, or `RDP`; `sort_by` takes `year` or `total`
+- `population_types` filters to `REF`, `ASY`, `OIP`, `IDP`, `STA`, `OOC`, `HST`, `RET`, or `RDP`, as a list or as a string of codes (`"REF"`, `"ref, idp"`); `sort_by` takes `year` or `total`
 - Each row is one population type: `total`, fourteen sex × age bands (`female_0_4` … `female_60_plus`, `female_unknown_age`, `female_total`, and the `male_*` twins), `disaggregated`, and `sex_disaggregated_share` (0–1). Bands are null where UNHCR has no breakdown
 - Totals come from a separate collection and need not match `unhcr_get_population`; matching `footnotes` come back as there
 
@@ -97,16 +98,18 @@ The five `unhcr_get_*` tools share one contract:
 
 ### `unhcr_get_asylum_applications` <sub>tool</sub>
 
-- `split_by` names which of `authority`, `stage`, and `decision_level` stay separate rows (default `["stage"]`; `[]` gives one total per year, scope, and unit). `stages` filters before summing, e.g. `["N"]` for new applications; `sort_by` takes `year` or `applied`
+- `split_by` names which of `authority`, `stage`, and `decision_level` stay separate rows (default `["stage"]`; `[]` gives one total per year, scope, and unit). `stages` filters before summing, e.g. `["N"]` for new applications; `sort_by` takes `year` or `applied`. `split_by` and `stages` also take a string of codes (`"N"`, `"N, R"`), and `split_by` folds case
 - Each row lists the `authorities`, `stages`, and `decision_levels` codes summed into it, its `unit` (`persons` or `cases`), and `applied`. Cases are never added to persons
+- Matching UNHCR `footnotes` come back as with population, matched on the summed rows after `stages` narrows them. Every row carries type `ASY` whatever its counts. A footnote can narrow the period a row covers, so check the footnotes before comparing years
 
 ---
 
 ### `unhcr_get_asylum_decisions` <sub>tool</sub>
 
-- `split_by` names which of `authority` and `decision_level` stay separate rows (default `[]`, all summed, as UNHCR does for its rates). `decision_levels` filters before summing, e.g. `["FI"]` for first instance
+- `split_by` names which of `authority` and `decision_level` stay separate rows (default `[]`, all summed, as UNHCR does for its rates). `decision_levels` filters before summing, e.g. `["FI"]` for first instance. Both also take a string of codes (`"FI"`, `"FI, AR"`), and `split_by` folds case
 - Each row carries `recognized`, `complementary_protection`, `rejected`, `otherwise_closed`, `total_decisions`, `substantive_decisions`, and a `unit`, plus `refugee_recognition_rate` and `total_protection_rate` as percentages of substantive decisions. A rate is null when that denominator is 0 or null
 - `sort_by` takes `year` or a count (`total_decisions`, `substantive_decisions`, `recognized`, `rejected`); rates are not sortable
+- Matching UNHCR `footnotes` come back as with population, matched on the summed rows after `decision_levels` narrows them; every row carries type `ASY`, and a footnote can narrow the period a row covers
 
 ---
 
@@ -156,7 +159,7 @@ Agent-friendly output:
 
 - Provenance on every data result: `applied_scope` echoes the codes, year window, and ISO2 rewrites actually sent, alongside `latest_year`, `measure`, `complete`, and `attribution`
 - Caveats as data: `data_notes` say how to read each result (stock or flow, rounding, what null means), and matching UNHCR `footnotes` arrive with `rows_matched`
-- Typed failures with recovery hints: `unknown_country_code` suggests the ISO3 for a UNHCR code, `year_out_of_coverage` names the dataset's span, `upstream_busy` carries `retryAfter`
+- Typed failures with recovery hints: `unknown_country_code` suggests the ISO3 for a UNHCR code or a common country name (`TURKEY is not an ISO country code; Türkiye is TUR.`), `year_out_of_coverage` names the dataset's span, `upstream_busy` carries `retryAfter`
 - Nothing trimmed silently: year and limit clamps, empty-result hints, truncation, and where the full set was staged all arrive as a notice in the response
 
 ## Getting started
@@ -200,6 +203,7 @@ UNHCR's API is keyless, so no key or account is needed, and every variable under
 | `UNHCR_DATASET_TTL_SECONDS` | Lifetime of a staged dataframe, in seconds (minimum 60). | `86400` |
 | `UNHCR_DATAFRAME_DROP_ENABLED` | Set `true` to register `unhcr_dataframe_drop`. | `false` |
 | `UNHCR_CLAMP_LIMITS` | Serves `limit`, `preview`, and `row_limit` above their cap at the cap, with a notice. Set `false` to advertise each cap as a schema `maximum` and reject a larger value. | `true` |
+| `UNHCR_NORMALIZE_INPUTS` | Reads `stages`, `decision_levels`, `population_types`, and `split_by` sent as a string as the array of the codes in it, and `split_by` in any case. Set `false` to reject both. | `true` |
 | `CANVAS_PROVIDER_TYPE` | Dataframe engine: `duckdb`, or `none` to turn dataframes off. | `duckdb` |
 | `CANVAS_DEFAULT_ROW_LIMIT` | Most rows one `unhcr_dataframe_query` call materializes; the cap on `row_limit`, and its default when below 1,000. | `10000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
@@ -217,7 +221,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 

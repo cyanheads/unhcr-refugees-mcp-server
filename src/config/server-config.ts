@@ -53,6 +53,12 @@ const ServerConfigSchema = z.object({
     .describe(
       'Serves a count input (limit, preview, row_limit) above its cap at the cap, with a notice. false advertises the cap as a schema maximum and rejects a larger value instead.',
     ),
+  normalizeInputs: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Reads a code-list input (stages, decision_levels, population_types, split_by) sent as a string as the array of its codes, and split_by in any case. false rejects both instead.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -68,6 +74,7 @@ export function getServerConfig(): ServerConfig {
     datasetTtlSeconds: 'UNHCR_DATASET_TTL_SECONDS',
     dataframeDropEnabled: 'UNHCR_DATAFRAME_DROP_ENABLED',
     clampLimits: 'UNHCR_CLAMP_LIMITS',
+    normalizeInputs: 'UNHCR_NORMALIZE_INPUTS',
   });
   return _config;
 }

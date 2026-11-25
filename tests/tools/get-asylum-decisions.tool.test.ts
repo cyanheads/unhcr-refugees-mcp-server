@@ -5,8 +5,9 @@
  * substantive decisions and both rates from summed counts, including a zero
  * denominator; cases never summed with persons (the US multi-unit series);
  * split_by grouping; the decision_levels filter and its own empty-result
- * notice; staged column types; every declared error reason; and form-client
- * blanks.
+ * notice; the UNHCR caveats matched on the aggregated rows, and the footnote
+ * request that fails the call with it; staged column types; every declared
+ * error reason; and form-client blanks.
  * @module tests/tools/get-asylum-decisions.tool.test
  */
 
@@ -19,20 +20,26 @@ import {
   type MockContextLogger,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAsylumDecisionsTool } from '@/mcp-server/tools/definitions/get-asylum-decisions.tool.js';
 import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { asylumCodeLabel } from '@/services/unhcr/codes.js';
-import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { disposeUnhcrService, getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import {
   ASYLUM_DECISION_ROWS,
   COUNTRY_ROWS,
   decisionRow,
+  envelope,
+  FOOTNOTE_ROWS,
+  footnoteRow,
   type RawRow,
+  USA_2024_FOOTNOTE_TEXT,
   USA_COUNTRY_ROW,
+  USA_DECISION_ROWS,
+  USA_FOOTNOTE_ROWS,
 } from '../fixtures/unhcr.js';
-import type { FakeUnhcr } from '../helpers/fake-unhcr.js';
-import { errorOf, structuredOf, textOf } from '../helpers/results.js';
+import { type FakeUnhcr, FOOTNOTE_FAULTS } from '../helpers/fake-unhcr.js';
+import { errorOf, structuredOf, textOf, unescapeMarkdown } from '../helpers/results.js';
 import { createTestCanvas, initFakeUpstream, shutdownCanvas } from '../helpers/services.js';
 
 type Input = z.input<typeof getAsylumDecisionsTool.input>;
@@ -41,12 +48,13 @@ let canvas: DataCanvas;
 let fake: FakeUnhcr;
 
 /** Serve the recorded tables with the US in the country table, plus any overrides. */
-const upstream = (decisions?: RawRow[]) => {
+const upstream = (decisions?: RawRow[], footnotes?: RawRow[]) => {
   disposeUnhcrService();
   ({ fake } = initFakeUpstream({
     tables: {
       countries: [...COUNTRY_ROWS, USA_COUNTRY_ROW],
       ...(decisions && { 'asylum-decisions': decisions }),
+      ...(footnotes && { footnotes }),
     },
   }));
 };
@@ -166,9 +174,29 @@ describe('success, both surfaces', () => {
   it('returns a zero-result page with the both-dimensions notice through the production enrichment parse', async () => {
     const result = await runToolContract(getAsylumDecisionsTool, { origin: 'SYR', asylum: 'TUR' });
     const structured = structuredOf(result);
-    expect(structured).toMatchObject({ rows: [], total_rows: 0, complete: true });
+    expect(structured).toMatchObject({
+      rows: [],
+      total_rows: 0,
+      complete: true,
+      footnotes: [],
+      footnotes_total: 0,
+    });
     expect(structured.notice).toContain('origin SYR in asylum TUR');
-    expect(textOf(result.content)).toContain(String(structured.notice));
+    const text = textOf(result.content);
+    expect(text).toContain(String(structured.notice));
+    expect(text).toContain(
+      '\n_No rows._\n\n**Footnotes:** none match (0 total)\n\n### Data notes\n',
+    );
+  });
+
+  it('names its own dataset in the one-country empty notice, on both surfaces', async () => {
+    const result = await runToolContract(getAsylumDecisionsTool, { origin: 'TIB' });
+    const structured = structuredOf(result);
+    const notice =
+      "UNHCR reports no asylum-decision rows for TIB in 2000–2025. Widen the year window, or check the dataset's span with unhcr_list_reference (topic coverage).";
+    expect(structured.total_rows).toBe(0);
+    expect(structured.notice).toBe(notice);
+    expect(textOf(result.content).split('\n')).toContain(`> ${notice}`);
   });
 
   it('returns an over-cap page with the truncation fields and the staged dataframe pointer', async () => {
@@ -370,6 +398,34 @@ describe('split_by and decision_levels', () => {
     ]);
   });
 
+  it('reads decision_levels and split_by sent as strings as the arrays of their codes, on both surfaces', async () => {
+    const scope: Input = { origin: 'SYR', asylum: 'DEU', year_to: 2024 };
+    const strings = await runToolContract(getAsylumDecisionsTool, {
+      ...scope,
+      decision_levels: 'fi JR' as unknown as [],
+      split_by: 'Decision_Level' as unknown as [],
+    });
+    const rows = structuredOf(strings).rows as Row[];
+    expect(rows.map((row) => [row.decision_levels, ...rates(row)])).toEqual([
+      [['FI'], 'persons', 77011, 9, 100],
+      [['JR'], 'persons', 3453, 6.3, 8.1],
+    ]);
+    expect(textOf(strings.content)).toContain('| JR | persons | ');
+    expect(strings).toEqual(
+      await runToolContract(getAsylumDecisionsTool, {
+        ...scope,
+        decision_levels: ['FI', 'JR'],
+        split_by: ['decision_level'],
+      }),
+    );
+  });
+
+  it('reads a decision_levels string naming no code as no filter', async () => {
+    const scope: Input = { origin: 'SYR', asylum: 'DEU', year_to: 2024 };
+    const result = await call({ ...scope, decision_levels: ',' as unknown as [] });
+    expect(result.rows.map((row) => row.decision_levels)).toEqual([['FI', 'JR', 'RA']]);
+  });
+
   it('gives the decision_levels filter its own notice when it empties rows UNHCR returned', async () => {
     const result = await runToolContract(getAsylumDecisionsTool, {
       origin: 'SYR',
@@ -436,13 +492,298 @@ describe('split_by and decision_levels', () => {
     ['an applications-only sort field', { sort_by: 'applied' as 'year' }],
     ['an unknown decision level', { decision_levels: ['ZZ'] }],
     ['an application-stage code', { decision_levels: ['V'] }],
+    ['a string with an unknown decision level', { decision_levels: 'FI,ZZ' as unknown as [] }],
     ['stage as a split dimension', { split_by: ['stage'] as unknown as [] }],
+    ['stage as a split string', { split_by: 'stage' as unknown as [] }],
+    ['a split string naming no dimension', { split_by: ',' as unknown as [] }],
     ['more than two split entries', { split_by: ['authority', 'authority', 'authority'] }],
     ['a non-numeric year', { year_from: 'recent' as unknown as number }],
   ])('rejects %s as invalid params before any upstream request', async (_label, input) => {
     const result = await runToolContract(getAsylumDecisionsTool, input as Input);
     expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(fake.calls).toHaveLength(0);
+  });
+});
+
+describe('footnotes', () => {
+  const usaUpstream = () =>
+    upstream([...ASYLUM_DECISION_ROWS, ...USA_DECISION_ROWS], USA_FOOTNOTE_ROWS);
+  const matches = (result: Awaited<ReturnType<typeof call>>) =>
+    result.footnotes.map((note) => [note.years, note.rows_matched]);
+
+  it('attaches the half-year caveat to the 2024 row of the US series, on both surfaces', async () => {
+    usaUpstream();
+    const result = await runToolContract(getAsylumDecisionsTool, {
+      asylum: 'USA',
+      year_from: 2023,
+      year_to: 2024,
+    });
+    const structured = structuredOf(result);
+    expect(
+      (structured.rows as Row[]).map((row) => [row.year, row.unit, row.total_decisions]),
+    ).toEqual([
+      [2023, 'persons', 319525],
+      [2024, 'persons', 259449],
+    ]);
+    expect(structured.footnotes).toEqual([
+      {
+        text: USA_2024_FOOTNOTE_TEXT,
+        years: '2024',
+        origin_iso3: null,
+        asylum_iso3: 'USA',
+        population_types: [
+          'REF',
+          'ROC',
+          'ASY',
+          'IDP',
+          'IOC',
+          'STA',
+          'OOC',
+          'RET',
+          'RDP',
+          'HST',
+          'OIP',
+          'RST',
+          'NAT',
+        ],
+        rows_matched: 1,
+      },
+    ]);
+    expect(structured.footnotes_total).toBe(1);
+    expect((structured.data_notes as string[])[0]).toBe(
+      'Counts are flows: asylum decisions made during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
+    );
+    expect(textOf(result.content)).toContain(
+      `\n\n### Footnotes (1 of 1)\n- **2024** · any origin, asylum USA · types REF, ROC, ASY, IDP, IOC, STA, OOC, RET, RDP, HST, OIP, RST, NAT · 1 rows matched\n\n> ${USA_2024_FOOTNOTE_TEXT}\n\n\n### Data notes\n- Counts are flows: asylum decisions made during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.\n`,
+    );
+  });
+
+  it('counts every row split by unit and by decision level in rows_matched', async () => {
+    usaUpstream();
+    // 2016 carries EOIR persons beside USCIS cases: two rows with every level summed.
+    expect(matches(await call({ asylum: 'USA', year_from: 2016, year_to: 2024 }))).toEqual([
+      ['2016', 2],
+      ['2024', 1],
+    ]);
+    const byLevel = await call({
+      asylum: 'USA',
+      year_from: 2024,
+      year_to: 2024,
+      split_by: ['decision_level'],
+    });
+    expect(byLevel.rows.map((row) => row.decision_levels)).toEqual([['AR'], ['EO'], ['IN']]);
+    expect(matches(byLevel)).toEqual([['2024', 3]]);
+  });
+
+  it('narrows the rows to the decision_levels filter before matching', async () => {
+    usaUpstream();
+    const byLevel: Input = { asylum: 'USA', year_from: 2016, split_by: ['decision_level'] };
+    expect(matches(await call({ ...byLevel, decision_levels: ['EO', 'IN'] }))).toEqual([
+      ['2016', 2],
+      ['2024', 2],
+    ]);
+    // Administrative reviews run 2023–2024, so the 2016 caveat has no row left to attach to.
+    expect(matches(await call({ ...byLevel, decision_levels: ['AR'] }))).toEqual([['2024', 1]]);
+    const emptied = await call({ ...byLevel, decision_levels: ['FI'] });
+    expect(emptied).toMatchObject({ rows: [], footnotes: [], footnotes_total: 0 });
+  });
+
+  it('carries ASY on a row whose counts are all 0 or all null, and attaches no caveat tagged only with other types', async () => {
+    const others = 'REF,ROC,OIP,IDP,IOC,STA,OOC,HST,RST,NAT,RET,RDP';
+    const tibetNote = (population_type: string) =>
+      footnoteRow({
+        footnote: `${population_type} caveat.`,
+        year: '2025',
+        coo: 'TIB',
+        coa: null,
+        population_type,
+      });
+    upstream(
+      [
+        ...ASYLUM_DECISION_ROWS,
+        // Illustrative: published zeros and figures not collected.
+        decisionRow(2025, 'TIB', null, ['G', 'FI', 'P'], ['0', '0', '0', '0', '0']),
+        decisionRow(2025, 'TIB', null, ['G', 'AR', 'P'], ['-', '-', '-', '-', '-']),
+      ],
+      [...others.split(','), others, 'ASY'].map(tibetNote),
+    );
+    const result = await call({ origin: 'TIB', year_from: 2025, split_by: ['decision_level'] });
+    expect(result.rows.map((row) => [row.recognized, row.total_decisions])).toEqual([
+      [null, null],
+      [0, 0],
+    ]);
+    expect(result.footnotes.map((note) => [note.text, note.rows_matched])).toEqual([
+      ['ASY caveat.', 2],
+    ]);
+    expect(result.footnotes_total).toBe(1);
+  });
+
+  it('keeps the inline rows’ caveat ahead of a cap that caveats past the effective limit would fill, on both surfaces', async () => {
+    const asylumNote = (asylum: string | null, footnote: string) =>
+      footnoteRow({ footnote, year: '2025', coo: null, coa: asylum, population_type: 'ASY' });
+    upstream(
+      [
+        ...ASYLUM_DECISION_ROWS.filter((row) => row.coo_iso === '-' && row.coa_iso === '-'),
+        // Illustrative: 2,000 decision levels, so the split yields one row each.
+        ...Array.from({ length: 2_000 }, (_, i) =>
+          decisionRow(2025, 'SYR', 'DEU', ['G', `L${i}`, 'P'], [0, 0, 0, 0, 10_000 + i]),
+        ),
+        decisionRow(2025, 'SYR', 'TUR', ['G', 'FI', 'P'], [0, 0, 0, 0, 5]),
+      ],
+      [
+        ...Array.from({ length: 21 }, (_, i) => asylumNote('TUR', `Türkiye caveat ${i}.`)),
+        asylumNote(null, 'General caveat.'),
+      ],
+    );
+    const result = await runToolContract(getAsylumDecisionsTool, {
+      ...syrPairs,
+      year_from: 2025,
+      split_by: ['decision_level'],
+      sort_by: 'total_decisions',
+      limit: 2_001,
+    });
+    const structured = structuredOf(result);
+    // Türkiye's row sorts last, at position 2,000: past the effective limit of 2,000, inside the
+    // 2,001 asked for, where its country-specific caveats would outrank the general one.
+    expect(structured.rows).toHaveLength(2_000);
+    expect(structured.footnotes_total).toBe(22);
+    expect(
+      (structured.footnotes as { rows_matched: number; text: string }[]).map((note) => [
+        note.text,
+        note.rows_matched,
+      ]),
+    ).toEqual([
+      ['General caveat.', 2_001],
+      ...Array.from({ length: 19 }, (_, i) => [`Türkiye caveat ${i}.`, 1]),
+    ]);
+    const text = textOf(result.content);
+    expect(text).toContain('### Footnotes (20 of 22)\n- **2025** · any origin, any asylum');
+    expect(text).toContain('\n> General caveat.\n');
+    expect(text).not.toContain('Türkiye caveat 19.');
+  });
+
+  it('returns every caveat when they outnumber the inline rows, on both surfaces', async () => {
+    const caveats = ['First caveat.', 'Second caveat.', 'Third caveat.'];
+    upstream(
+      undefined,
+      caveats.map((footnote) =>
+        footnoteRow({
+          footnote,
+          year: '2024 - 2025',
+          coo: null,
+          coa: 'DEU',
+          population_type: 'ASY',
+        }),
+      ),
+    );
+    const result = await runToolContract(getAsylumDecisionsTool, {
+      origin: 'SYR',
+      asylum: 'DEU',
+      limit: 1,
+    });
+    const structured = structuredOf(result);
+    expect(structured.rows).toHaveLength(1);
+    expect(structured.footnotes_total).toBe(3);
+    expect((structured.footnotes as { text: string }[]).map((note) => note.text)).toEqual(caveats);
+    const heading = '- **2024 - 2025** · any origin, asylum DEU · types ASY · 2 rows matched';
+    expect(textOf(result.content)).toContain(
+      `### Footnotes (3 of 3)\n${heading}\n\n> First caveat.\n\n${heading}\n\n> Second caveat.\n\n${heading}\n\n> Third caveat.\n`,
+    );
+  });
+
+  it('rejects with the caller’s own cancellation while only the footnotes are in flight', async () => {
+    const requested = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<Response>();
+    fake.intercept({
+      endpoint: 'footnotes',
+      respond: () => {
+        requested.resolve();
+        return held.promise;
+      },
+    });
+    const data = vi.spyOn(getUnhcrService(), 'asylumDecisions');
+    const controller = new AbortController();
+    // The handler itself: the framework settles any aborted call as cancelled, whatever it returned.
+    const pending = call(
+      { origin: 'SYR', asylum: 'DEU' },
+      createMockContext({ errors: getAsylumDecisionsTool.errors, signal: controller.signal }),
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'caller went away',
+    });
+    await requested.promise;
+    await expect(data.mock.results[0]?.value).resolves.toMatchObject({ complete: true });
+    controller.abort(new DOMException('caller went away', 'AbortError'));
+    await rejected;
+    held.resolve(Response.json({ page: 1, maxPages: 1, items: FOOTNOTE_ROWS }));
+  });
+
+  /** Timers are faked, so the retry backoff and the 45 s call deadline run without a wait. */
+  describe('their request', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      upstream();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('goes out while the data page is still on its way', async () => {
+      const requested = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<Response>();
+      fake.intercept({
+        endpoint: 'asylum-decisions',
+        matches: (params) => params.has('yearFrom'),
+        respond: () => {
+          requested.resolve();
+          return held.promise;
+        },
+      });
+      const pending = runToolContract(getAsylumDecisionsTool, { origin: 'SYR', asylum: 'DEU' });
+      await requested.promise;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fake.urlsFor('footnotes')).toHaveLength(1);
+      held.resolve(
+        Response.json(
+          envelope([decisionRow(2025, 'SYR', 'DEU', ['G', 'FI', 'P'], [1, 1, 1, 1, 4])]),
+        ),
+      );
+      expect(structuredOf(await pending)).toMatchObject({ total_rows: 1 });
+    });
+
+    it.each(FOOTNOTE_FAULTS)(
+      'fails the call on $fault, though the data page arrived',
+      async ({ code, data, message, requests, respond }) => {
+        const requested = Promise.withResolvers<void>();
+        fake.intercept({
+          endpoint: 'footnotes',
+          respond: (request) => {
+            requested.resolve();
+            return respond(request);
+          },
+        });
+        let settled = false;
+        const pending = runToolContract(getAsylumDecisionsTool, { origin: 'SYR' }).finally(() => {
+          settled = true;
+        });
+        await requested.promise;
+        await vi.advanceTimersByTimeAsync(44_999);
+        // Only an answer that never comes holds the call to the end of its 45 s.
+        expect(settled).toBe(code !== JsonRpcErrorCode.Timeout);
+        await vi.advanceTimersByTimeAsync(1);
+        const result = await pending;
+        const error = errorOf(result);
+        expect(error.code).toBe(code);
+        expect(error.message).toContain(message);
+        expect(error.data).toEqual(data);
+        expect(Object.keys(result.structuredContent ?? {})).toEqual(['error']);
+        expect(unescapeMarkdown(textOf(result.content))).toContain(message);
+        expect(fake.urlsFor('footnotes')).toHaveLength(requests);
+        expect(dataRequests()).toHaveLength(1);
+      },
+    );
   });
 });
 

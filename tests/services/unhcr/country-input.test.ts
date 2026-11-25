@@ -1,8 +1,8 @@
 /**
  * @fileoverview Tests for country input normalization against a country
  * table built from recorded `/countries/` rows: ISO3 in any case, ISO2
- * rewritten to ISO3, UNHCR codes and names refused with the exact ISO3, and
- * UNHCR's "UK" (Unknown) never read as the United Kingdom.
+ * rewritten to ISO3, UNHCR codes and common country names refused with the
+ * exact ISO3, and UNHCR's "UK" (Unknown) never read as the United Kingdom.
  * @module tests/services/unhcr/country-input.test
  */
 
@@ -15,6 +15,7 @@ import {
   parseCodeList,
   resolveCountryCodes,
 } from '@/services/unhcr/country-input.js';
+import type { Country } from '@/services/unhcr/types.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { initFakeUpstream } from '../../helpers/services.js';
 
@@ -216,12 +217,124 @@ describe('resolveCountryCodes', () => {
     expect(result).toEqual({ ok: true, iso3: ['SYR'], normalized: [{ input: 'SY', iso3: 'SYR' }] });
   });
 
+  it('accepts every ISO3 and ISO2 code in the table except UK', () => {
+    for (const country of table.byIso3.values()) {
+      const codes = [country.iso3, country.iso2].filter((code) => code !== null && code !== 'UK');
+      expect(resolveCountryCodes(codes as string[], table), country.name).toMatchObject({
+        ok: true,
+        iso3: [country.iso3],
+      });
+    }
+  });
+
   it('refuses UK, UNHCR’s alpha-2 for Unknown, and names GBR for the United Kingdom', () => {
+    expect(table.byIso2.get('UK')?.iso3).toBe('UNK');
     expect(resolveCountryCodes(['UK'], table)).toEqual({
       ok: false,
       unknown: ['UK'],
       unresolved: [],
-      suggestions: ['UK is not an ISO country code; the United Kingdom is GBR.'],
+      suggestions: [
+        'UK is not an ISO country code; United Kingdom of Great Britain and Northern Ireland is GBR.',
+      ],
+    });
+  });
+
+  it('refuses UK even when UNHCR’s list has no GBR to name', () => {
+    const without = buildCountryTable(
+      [...table.byIso3.values()].filter(({ iso3 }) => iso3 !== 'GBR'),
+    );
+    expect(without.byIso2.get('UK')?.iso3).toBe('UNK');
+    expect(resolveCountryCodes(['UK'], without)).toEqual({
+      ok: false,
+      unknown: ['UK'],
+      unresolved: ['UK'],
+      suggestions: [],
+    });
+  });
+
+  it.each([
+    ['TURKEY', 'TURKEY is not an ISO country code; Türkiye is TUR.'],
+    ['TÜRKEY', 'TURKEY is not an ISO country code; Türkiye is TUR.'],
+    ['[**TURKEY**]\n!', 'TURKEY is not an ISO country code; Türkiye is TUR.'],
+    [
+      'U.K.',
+      'UK is not an ISO country code; United Kingdom of Great Britain and Northern Ireland is GBR.',
+    ],
+    [
+      'WEST BANK AND GAZA',
+      'WEST BANK AND GAZA is not an ISO country code; State of Palestine is PSE.',
+    ],
+  ])(
+    'refuses the common name %j, naming the exact ISO3 and quoting only the table’s key',
+    (code, hint) => {
+      expect(resolveCountryCodes([code], table)).toEqual({
+        ok: false,
+        unknown: [code],
+        unresolved: [],
+        suggestions: [hint],
+      });
+    },
+  );
+
+  it('keeps a common name apart from a name it cannot suggest for and a UNHCR code, in input order', () => {
+    expect(resolveCountryCodes(['SYRIA', 'TURKEY', 'DE', 'GFR', 'TURKEYS'], table)).toEqual({
+      ok: false,
+      unknown: ['SYRIA', 'TURKEY', 'GFR', 'TURKEYS'],
+      unresolved: ['SYRIA', 'TURKEYS'],
+      suggestions: [
+        'TURKEY is not an ISO country code; Türkiye is TUR.',
+        "GFR is UNHCR's code for Germany; pass DEU.",
+      ],
+    });
+  });
+
+  it('suggests nothing for a common name whose country UNHCR’s list lacks', () => {
+    expect(table.byIso3.has('SWZ')).toBe(false);
+    expect(resolveCountryCodes(['SWAZILAND'], table)).toEqual({
+      ok: false,
+      unknown: ['SWAZILAND'],
+      unresolved: ['SWAZILAND'],
+      suggestions: [],
+    });
+  });
+
+  it('reads a common name that is also a UNHCR code as the UNHCR code, and one that is an ISO3 as the ISO3', () => {
+    const country = (iso3: string, unhcrCode: string, name: string): Country => ({
+      unhcrCode,
+      iso3,
+      iso2: null,
+      name,
+      nameLong: null,
+      nameShort: null,
+      nameFormal: null,
+      nameOrigin: null,
+      nationality: null,
+      majorArea: null,
+      unsdRegion: null,
+    });
+    const colliding = buildCountryTable([
+      country('KOR', 'KOR', 'Rep. of Korea'),
+      country('ROU', 'ROK', 'Romania'),
+      country('CHN', 'CHI', 'China'),
+      country('PRC', 'PRC', 'Elsewhere'),
+    ]);
+    expect(resolveCountryCodes(['ROK'], colliding)).toMatchObject({
+      ok: false,
+      suggestions: ["ROK is UNHCR's code for Romania; pass ROU."],
+    });
+    expect(resolveCountryCodes(['PRC'], colliding)).toEqual({
+      ok: true,
+      iso3: ['PRC'],
+      normalized: [],
+    });
+  });
+
+  it('suggests nothing for an object-prototype key', () => {
+    expect(resolveCountryCodes(['CONSTRUCTOR', '__PROTO__'], table)).toEqual({
+      ok: false,
+      unknown: ['CONSTRUCTOR', '__PROTO__'],
+      unresolved: ['CONSTRUCTOR', '__PROTO__'],
+      suggestions: [],
     });
   });
 

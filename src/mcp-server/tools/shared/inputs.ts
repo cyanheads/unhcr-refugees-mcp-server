@@ -17,20 +17,123 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
     schema,
   );
 
+/** Spells one code as its enum does. */
+type Fold = (code: string) => string;
+
+const upperCase: Fold = (code) => code.trim().toUpperCase();
+const lowerCase: Fold = (code) => code.trim().toLowerCase();
+
+/** Every string entry folded; any other entry is left for the enum to reject. */
+const foldEntries = (entries: readonly unknown[], fold: Fold): unknown[] =>
+  entries.map((entry) => (typeof entry === 'string' ? fold(entry) : entry));
+
+/**
+ * A list argument as an array of folded codes; a string is split on commas and
+ * whitespace. Returns the argument itself when there is nothing to rewrite: an
+ * array already in the enum's case, a string naming no code, anything else, or
+ * a string opening with `[` — an encoded array, which the framework decodes.
+ */
+function readCodes(value: unknown, fold: Fold): unknown {
+  if (Array.isArray(value)) {
+    const folded = foldEntries(value, fold);
+    return folded.some((entry, i) => entry !== value[i]) ? folded : value;
+  }
+  if (typeof value !== 'string' || value.trimStart().startsWith('[')) return value;
+  const codes = value.split(/[\s,]+/).filter((code) => code !== '');
+  return codes.length > 0 ? codes.map(fold) : value;
+}
+
+/** Validated lists a {@link codeArray} rewrote; `finishRows` logs and counts each one. */
+const normalizedLists = new WeakSet<object>();
+
+/** Whether a validated input is a list read from a form only normalization accepts. */
+export const isNormalizedList = (value: unknown): boolean =>
+  Array.isArray(value) && normalizedLists.has(value);
+
+/** An array over a closed code list, one entry per code at most. */
+type CodeArray<T extends readonly string[]> = z.ZodArray<z.ZodEnum<{ [K in T[number]]: K }>>;
+
+/**
+ * A {@link CodeArray} with `wrap` giving it its unset value. With `normalize`
+ * it takes every form {@link readCodes} reads and tags the list that validated.
+ * The rewrite runs before validation, and up to three times on a call the
+ * framework repairs or rejects, so it tags nothing itself: it notes what it did
+ * for the array's own check, which runs on the validated array later in the
+ * same synchronous parse. Zod hands a check nothing else from the preprocess in
+ * front of it, since an array's output is always a new array.
+ */
+function codeArray<const T extends readonly [string, ...string[]], S extends z.ZodType>(
+  codes: T,
+  options: {
+    fold: Fold;
+    item: string;
+    normalize: boolean;
+    wrap: (list: CodeArray<T>) => S;
+  },
+) {
+  const { fold, item, normalize, wrap } = options;
+  let rewritten = false;
+  const list = z
+    .array(z.enum(codes).describe(item))
+    .max(codes.length)
+    .check(({ value }) => {
+      if (rewritten) normalizedLists.add(value);
+    });
+  return z.preprocess((value) => {
+    const read = normalize ? readCodes(value, fold) : value;
+    rewritten = read !== value;
+    return read;
+  }, wrap(list));
+}
+
 /**
  * An optional filter over a closed code list (asylum stages, decision levels,
- * population types). Codes are trimmed and uppercased before the enum check,
- * so matching is case-insensitive; a blank or `[]` means no filter.
+ * population types), for one normalize mode. Codes are trimmed and uppercased
+ * before the enum check, so matching is case-insensitive; a blank or `[]`
+ * means no filter. By default a string reads as the array of the codes in it,
+ * and a string naming no code is no filter; with `UNHCR_NORMALIZE_INPUTS=false`
+ * the schema rejects any string but a blank.
  */
-export const codeList = <const T extends readonly [string, ...string[]]>(codes: T, item: string) =>
+export const codeList = <const T extends readonly [string, ...string[]]>(
+  codes: T,
+  item: string,
+  normalize: boolean,
+) =>
   blankAsUnset(
     z.preprocess(
-      (value) =>
-        Array.isArray(value)
-          ? value.map((code) => (typeof code === 'string' ? code.trim().toUpperCase() : code))
-          : value,
-      z.array(z.enum(codes).describe(item)).max(codes.length).optional(),
+      (value) => {
+        if (Array.isArray(value)) return foldEntries(value, upperCase);
+        return normalize && typeof value === 'string' && !/[^\s,]/.test(value) ? undefined : value;
+      },
+      codeArray(codes, {
+        fold: upperCase,
+        item,
+        normalize,
+        wrap: (list) => list.optional(),
+      }),
     ),
+  );
+
+/**
+ * The asylum tools' `split_by` for one normalize mode, with `wrap` adding the
+ * tool's default. By default a string reads as the array of the dimensions in
+ * it, and case is folded in either form. A string naming no dimension is
+ * rejected: it could mean the default, as `""` does, or no split, as `[]` does.
+ * With `UNHCR_NORMALIZE_INPUTS=false` the schema takes only arrays in the
+ * enum's case.
+ */
+export const splitByList = <const T extends readonly [string, ...string[]], S extends z.ZodType>(
+  dimensions: T,
+  normalize: boolean,
+  wrap: (list: CodeArray<T>) => S,
+) =>
+  blankAsUnset(
+    codeArray(dimensions, {
+      fold: lowerCase,
+      item: 'A procedure dimension to keep separate.',
+      normalize,
+      wrap,
+    }),
   );
 
 /**

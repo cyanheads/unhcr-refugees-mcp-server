@@ -496,6 +496,25 @@ describe('pacing and the call deadline', () => {
     ).rejects.toMatchObject({ name: 'AbortError', message: 'caller went away' });
   });
 
+  it('leaves no unhandled rejection when the work of an already-cancelled caller fails', async () => {
+    const { fake, service } = setup();
+    fake.intercept({ endpoint: 'population', respond: htmlNotFound });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      await expect(
+        service.population(syrQuery, createMockContext({ signal: AbortSignal.abort() })),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(fake.calls).toHaveLength(1));
+      for (let turn = 0; turn < 5; turn++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
   /**
    * The call's real 45 s deadline (no `deadlineMs` override) passing partway
    * through a four-page walk. Time is faked (`setTimeout`, `Date`), so the
@@ -707,7 +726,57 @@ describe('reference data', () => {
     });
   });
 
-  it('loads each regional bureau’s members and sorts bureaus by name', async () => {
+  /** Timers are faked, so the retry backoff runs without a wait. */
+  describe('an empty list, which UNHCR never publishes', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const load = {
+      countries: async (service: UnhcrApiService) =>
+        (await service.countries(createMockContext())).list,
+      regions: async (service: UnhcrApiService) =>
+        (await service.regions(createMockContext())).regions,
+      footnotes: (service: UnhcrApiService) => service.footnotes(createMockContext()),
+    };
+    const emptyList = () => Response.json({ page: 1, maxPages: 0, items: [] });
+
+    it.each(['countries', 'regions', 'footnotes'] as const)(
+      'is retried for %s',
+      async (endpoint) => {
+        const { fake, service } = setup();
+        fake.intercept({ endpoint, once: true, respond: emptyList });
+        const pending = load[endpoint](service);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await pending).length).toBeGreaterThan(0);
+      },
+    );
+
+    it.each(['countries', 'regions', 'footnotes'] as const)(
+      'fails %s after the retries and is not kept for the next call',
+      async (endpoint) => {
+        const { fake, service } = setup();
+        for (let attempt = 0; attempt < 3; attempt++) {
+          fake.intercept({ endpoint, once: true, respond: emptyList });
+        }
+        const failed = expect(load[endpoint](service)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          message: expect.stringContaining('UNHCR API returned an empty reference list.'),
+        });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await failed;
+        const pending = load[endpoint](service);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect((await pending).length).toBeGreaterThan(0);
+      },
+    );
+  });
+
+  it('loads each regional bureau’s members, maps every one to its bureau, and sorts bureaus by name', async () => {
     const { fake, service } = setup();
     const { regions, regionByIso3 } = await service.regions(createMockContext());
     expect(regions.map((region) => region.name)).toEqual([
@@ -725,9 +794,26 @@ describe('reference data', () => {
       'TUR',
       'UKR',
     ]);
-    expect(regionByIso3.get('DEU')).toBe('Europe');
-    expect(regionByIso3.get('SYR')).toBe('Middle East and North Africa');
-    expect(regionByIso3.has('XXA')).toBe(false);
+    // Two bureaus have no member here, and XXA (stateless) is in none.
+    expect(Object.fromEntries(regionByIso3)).toEqual({
+      EGY: 'Middle East and North Africa',
+      IRQ: 'Middle East and North Africa',
+      JOR: 'Middle East and North Africa',
+      LBN: 'Middle East and North Africa',
+      MAR: 'Middle East and North Africa',
+      PSE: 'Middle East and North Africa',
+      SYR: 'Middle East and North Africa',
+      AFG: 'Asia and the Pacific',
+      AUS: 'Asia and the Pacific',
+      JPN: 'Asia and the Pacific',
+      CUW: 'The Americas',
+      MTQ: 'The Americas',
+      AUT: 'Europe',
+      DEU: 'Europe',
+      GBR: 'Europe',
+      TUR: 'Europe',
+      UKR: 'Europe',
+    });
     const regionCalls = fake
       .urlsFor('countries')
       .map((url) => url.searchParams.get('unhcr_region'));

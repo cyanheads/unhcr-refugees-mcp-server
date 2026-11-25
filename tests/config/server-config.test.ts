@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for the server's env-driven configuration: defaults, the
- * `z.stringbool()` drop and clamp flags (so `false` actually turns each off),
- * and range rejections that name the environment variable. The config is
+ * `z.stringbool()` drop, clamp, and normalize flags (so `false` actually turns
+ * each off), and range rejections that name the environment variable. The config is
  * parsed once per module instance, so each case imports a fresh module.
  * @module tests/config/server-config.test
  */
@@ -22,6 +22,7 @@ const VARS = [
   'UNHCR_DATASET_TTL_SECONDS',
   'UNHCR_DATAFRAME_DROP_ENABLED',
   'UNHCR_CLAMP_LIMITS',
+  'UNHCR_NORMALIZE_INPUTS',
 ];
 
 const clearVars = () => {
@@ -43,6 +44,7 @@ describe('getServerConfig', () => {
       datasetTtlSeconds: 86_400,
       dataframeDropEnabled: false,
       clampLimits: true,
+      normalizeInputs: true,
     });
   });
 
@@ -54,6 +56,7 @@ describe('getServerConfig', () => {
     vi.stubEnv('UNHCR_DATASET_TTL_SECONDS', '60');
     vi.stubEnv('UNHCR_DATAFRAME_DROP_ENABLED', 'true');
     vi.stubEnv('UNHCR_CLAMP_LIMITS', 'false');
+    vi.stubEnv('UNHCR_NORMALIZE_INPUTS', 'false');
     const getServerConfig = await loadConfig();
     const config = getServerConfig();
     expect(config).toEqual({
@@ -63,6 +66,7 @@ describe('getServerConfig', () => {
       datasetTtlSeconds: 60,
       dataframeDropEnabled: true,
       clampLimits: false,
+      normalizeInputs: false,
     });
     vi.stubEnv('UNHCR_MAX_ROWS', '20000');
     expect(getServerConfig()).toBe(config);
@@ -84,6 +88,7 @@ describe('getServerConfig', () => {
     ['UNHCR_DATASET_TTL_SECONDS', '59'],
     ['UNHCR_DATAFRAME_DROP_ENABLED', 'maybe'],
     ['UNHCR_CLAMP_LIMITS', 'sometimes'],
+    ['UNHCR_NORMALIZE_INPUTS', 'strict'],
   ])('rejects %s=%s with a configuration error naming the variable', async (name, value) => {
     clearVars();
     vi.stubEnv(name, value);

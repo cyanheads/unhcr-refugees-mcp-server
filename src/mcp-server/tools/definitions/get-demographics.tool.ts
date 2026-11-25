@@ -21,7 +21,6 @@ import { blankAsUnset, codeList, resultInputs, scopeInputs } from '../shared/inp
 import { cell, count, table } from '../shared/markdown.js';
 import {
   dataEnrichment,
-  footnoteSchema,
   identityCells,
   identityFields,
   normalizationNotes,
@@ -133,6 +132,13 @@ const STAGED_TYPES: Partial<Record<keyof DemographicsOutputRow & string, ColumnS
   sex_disaggregated_share: 'DOUBLE',
 };
 
+/** This tool's list input for one normalize mode. */
+export const demographicLists = (normalize: boolean) => ({
+  population_types: codeList(DEMOGRAPHIC_TYPES, 'A population-type code.', normalize).describe(
+    'Keep only these population types, case-insensitive: REF refugees, ASY asylum-seekers, OIP other people in need of international protection, IDP internally displaced, STA stateless, OOC others of concern, HST host community, RET returned refugees, RDP returned IDPs. Decode them with unhcr_list_reference (topic population_types). Omit for every type.',
+  ),
+});
+
 export const getDemographicsTool = tool('unhcr_get_demographics', {
   title: 'UNHCR demographics',
   description:
@@ -141,9 +147,7 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
 
   input: z.object({
     ...scopeInputs,
-    population_types: codeList(DEMOGRAPHIC_TYPES, 'A population-type code.').describe(
-      'Keep only these population types, case-insensitive: REF refugees, ASY asylum-seekers, OIP other people in need of international protection, IDP internally displaced, STA stateless, OOC others of concern, HST host community, RET returned refugees, RDP returned IDPs. Decode them with unhcr_list_reference (topic population_types). Omit for every type.',
-    ),
+    ...demographicLists(true),
     sort_by: blankAsUnset(z.enum(['year', 'total']).default('year')).describe(
       'Order of the full result before the inline cut. year (default) orders by year, then origin ISO3, then asylum ISO3, then population type; total orders largest first, nulls last.',
     ),
@@ -185,12 +189,6 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
       )
       .describe('Inline rows, sorted, up to limit.'),
     ...sharedResultFields,
-    footnotes: z
-      .array(footnoteSchema)
-      .describe(
-        'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
-      ),
-    footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
   }),
 
   enrichment: dataEnrichment,

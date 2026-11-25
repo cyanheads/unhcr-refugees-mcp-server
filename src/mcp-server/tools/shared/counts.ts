@@ -28,11 +28,11 @@ export interface CountClamp {
   notice?: string;
 }
 
-/**
- * Created on first clamp, not at import: `createCounter` reads the framework
- * config, which must not be parsed before `src/index.ts` loads `.env`.
- */
-let clampCounter: ReturnType<typeof createCounter> | undefined;
+const clampCounter = createCounter(
+  'unhcr.count_input.clamped',
+  'Count inputs served at their cap because the caller asked for more',
+  '{call}',
+);
 
 /**
  * Serve `requested` at `cap` when it is larger. A clamp logs once at info and
@@ -45,11 +45,6 @@ export function clampCount(
   const { tool, field, requested, cap } = input;
   if (requested <= cap) return { effective: requested };
   ctx.log.info('Count input clamped', { tool, field, requested, effective: cap });
-  clampCounter ??= createCounter(
-    'unhcr.count_input.clamped',
-    'Count inputs served at their cap because the caller asked for more',
-    '{call}',
-  );
   clampCounter.add(1, { [ATTR_MCP_TOOL_NAME]: tool, 'unhcr.count_input.field': field });
   return { effective: cap, notice: `Requested ${field} ${requested}; effective ${field} ${cap}.` };
 }

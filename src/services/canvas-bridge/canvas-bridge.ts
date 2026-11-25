@@ -1,19 +1,21 @@
 /**
  * @fileoverview Adapter between the unhcr_* tools and the framework DataCanvas.
- * Keeps one shared canvas per tenant (its id in `ctx.state` under
- * `canvas-id`), mints `df_XXXXX_XXXXX` table names, records provenance and
- * expiry in `ctx.state` (`df-meta/<name>`), and lazily sweeps expired
- * metadata on every operation. Each tenant's staged rows are held to a budget:
- * once a new dataframe exists, the oldest others are evicted until the total
- * fits. Registration is best-effort: any failure logs a warning and returns
- * nothing, so the calling data tool keeps its inline rows. A
- * `ConfigurationError` from the lazy DuckDB load (the native binding is
- * absent, as in the `.mcpb` bundle) is latched once as "canvas unavailable",
- * and every later call takes the canvas-off path. Queries run through the
- * framework's read-only SQL gate with system catalogs denied, and the gate's
- * rejections are rebuilt with this server's recovery hints. Engine error text
- * goes to the server-only logger; `ctx.log` reaches the client, so it gets
- * fixed messages.
+ * Keeps one shared canvas per tenant through `DataCanvas.acquireShared` (its id
+ * in `ctx.state` under `canvas-id`), mints `df_XXXXX_XXXXX` table names, records
+ * provenance and expiry in `ctx.state` (`df-meta/<name>`), and lazily sweeps
+ * expired metadata on every operation. Metadata names the canvas its table is
+ * on: all of it is deleted when that canvas is found dead, and whatever names
+ * another canvas than the live one is never read. Each tenant's staged rows are
+ * held to a budget: once a new dataframe exists, the oldest others are evicted
+ * until the total fits, one recording at a time per tenant. Registration is
+ * best-effort: any failure logs a warning and returns nothing, so the calling
+ * data tool keeps its inline rows. A `ConfigurationError` from the lazy DuckDB
+ * load (the native binding is absent, as in the `.mcpb` bundle) is latched once
+ * as "canvas unavailable", and every later call takes the canvas-off path.
+ * Queries run through the framework's read-only SQL gate with system catalogs
+ * denied, and the gate's rejections are rebuilt with this server's recovery
+ * hints. Engine error text goes to the server-only logger; `ctx.log` reaches
+ * the client, so it gets fixed messages.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -22,6 +24,7 @@ import type {
   CanvasInstance,
   ColumnSchema,
   DataCanvas,
+  DescribedColumn,
   QueryResult,
 } from '@cyanheads/mcp-ts-core/canvas';
 import {
@@ -36,13 +39,16 @@ import type { Provider } from '@/services/unhcr/codes.js';
 
 /** Provenance and schema for one staged dataframe, persisted in `ctx.state`. */
 export interface DataframeMeta {
-  columnSchema: ColumnSchema[];
+  /** Canvas the table is on. Metadata naming another canvas than the live one, or none, is of a dead canvas. */
+  canvasId: string;
+  /** A data tool's columns as registered; a `registerAs` result's as the engine describes them, `engineType` included. */
+  columnSchema: DescribedColumn[];
   /** `false` when the row cap stopped the upstream fetch that produced the rows. */
   complete: boolean;
   createdAt: string;
   expiresAt: string;
   /** Original incomplete upstream handles, retained independently of ancestor lifetime. */
-  incompleteSources?: string[];
+  incompleteSources: string[];
   /** Third-party series the rows carry, for attribution downstream. */
   providers: Provider[];
   queryParams: Record<string, unknown>;
@@ -184,9 +190,34 @@ export const errorText = (error: unknown): string =>
 
 const count = (n: number): string => n.toLocaleString('en-US');
 
+/**
+ * Join `queue` and wait to be called. A waiter whose signal aborts first leaves
+ * the queue and rejects with the signal's reason, without waiting for its turn.
+ */
+async function waitInQueue(queue: (() => void)[], signal: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const leave = () => {
+    const index = queue.indexOf(resolve);
+    if (index !== -1) queue.splice(index, 1);
+    reject(signal.reason);
+  };
+  queue.push(resolve);
+  signal.addEventListener('abort', leave, { once: true });
+  try {
+    await promise;
+  } finally {
+    signal.removeEventListener('abort', leave);
+  }
+}
+
 export class CanvasBridge {
   private latchedOff = false;
   private readonly listing: boolean;
+  /**
+   * Calls waiting behind the recording underway for a tenant. An entry exists
+   * only while one runs: the last call out deletes it.
+   */
+  private readonly recordQueues = new Map<string, (() => void)[]>();
   private readonly rowBudget: number;
   private readonly ttlMs: number;
 
@@ -217,8 +248,8 @@ export class CanvasBridge {
   async register(ctx: Context, options: RegisterOptions): Promise<StagedDataset | undefined> {
     if (this.latchedOff || options.rows.length === 0) return;
     try {
-      await this.sweepExpired(ctx);
       const instance = await this.acquireSharedCanvas(ctx);
+      await this.sweepExpired(ctx, instance);
       const tableName = this.mintName();
       const result = await instance.registerTable(tableName, options.rows, {
         schema: options.schema,
@@ -227,6 +258,7 @@ export class CanvasBridge {
       });
       const createdAt = Date.now();
       const meta: DataframeMeta = {
+        canvasId: instance.canvasId,
         tableName: result.tableName,
         sourceTool: options.sourceTool,
         queryParams: options.queryParams,
@@ -238,13 +270,12 @@ export class CanvasBridge {
         providers: options.providers,
         columnSchema: options.schema,
       };
-      await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
+      const evicted = await this.recordWithinBudget(ctx, instance, meta);
       ctx.log.info('Dataframe staged', {
         tableName: result.tableName,
         rowCount: result.rowCount,
         sourceTool: options.sourceTool,
       });
-      const evicted = await this.evictOverBudget(ctx, instance, meta.tableName);
       return {
         name: meta.tableName,
         row_count: meta.rowCount,
@@ -263,41 +294,50 @@ export class CanvasBridge {
     }
   }
 
-  /** Staged dataframes, newest first; one when `name` is given. Expired entries are swept first. */
+  /**
+   * Dataframes staged on the live canvas, newest first; one when `name` is
+   * given, none when no canvas is live. Expired entries are swept first.
+   */
   async describe(ctx: Context, name?: string): Promise<DataframeMeta[]> {
-    await this.sweepExpired(ctx);
+    const instance = await this.acquireSharedCanvas(ctx, { create: false });
+    if (!instance) return [];
+    await this.sweepExpired(ctx, instance);
     if (name !== undefined) {
-      const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
+      const meta = await this.readMeta(ctx, instance, name);
       return meta ? [meta] : [];
     }
     const entries: DataframeMeta[] = [];
-    for await (const { meta } of this.iterateMeta(ctx)) entries.push(meta);
+    for await (const { meta } of this.iterateLiveMeta(ctx, instance)) entries.push(meta);
     return entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   /**
-   * Run one read-only SELECT on the shared canvas. A referenced `df_<id>` that
-   * is not staged fails as `missing_table` before the gate runs; the gate's own
-   * rejections are rebuilt with the calling tool's recovery hints. With
-   * `registerAs`, the result is saved as a new dataframe with a fresh TTL and
-   * the budget evicts the oldest others; a result that alone exceeds the budget
-   * is dropped and fails `register_as_too_large`, evicting nothing.
+   * Run one read-only SELECT on the shared canvas, minting it only when the SQL
+   * names no dataframe. A referenced `df_<id>` that is not staged fails as
+   * `missing_table` before the gate runs; the gate's own rejections are rebuilt
+   * with the calling tool's recovery hints. With `registerAs`, the result is
+   * saved as a new dataframe with a fresh TTL and the budget evicts the oldest
+   * others; a result that alone exceeds the budget is dropped and fails
+   * `register_as_too_large`, evicting nothing.
    */
   async query(ctx: Context, sql: string, options: BridgeQueryOptions): Promise<BridgeQueryResult> {
-    await this.sweepExpired(ctx);
+    const names = referencedDataframes(sql);
+    const [firstName] = names;
+    let instance: CanvasInstance | undefined;
+    if (firstName === undefined) {
+      instance = await this.acquireSharedCanvas(ctx);
+    } else {
+      instance = await this.acquireSharedCanvas(ctx, { create: false });
+      if (!instance) throw this.missingTable(ctx, firstName);
+    }
+    await this.sweepExpired(ctx, instance);
     const referenced: DataframeMeta[] = [];
-    for (const name of referencedDataframes(sql)) {
-      const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
-      if (!meta) {
-        throw notFound(
-          `Dataframe ${name} is not staged; it may have expired or been evicted to make room for newer dataframes.`,
-          { reason: 'missing_table', tableName: name, ...ctx.recoveryFor('missing_table') },
-        );
-      }
+    for (const name of names) {
+      const meta = await this.readMeta(ctx, instance, name);
+      if (!meta) throw this.missingTable(ctx, name);
       referenced.push(meta);
     }
 
-    const instance = await this.acquireSharedCanvas(ctx);
     let result: QueryResult;
     try {
       result = await instance.query(sql, {
@@ -315,11 +355,7 @@ export class CanvasBridge {
 
     const providers = [...new Set(referenced.flatMap((meta) => meta.providers))].sort();
     const incompleteSources = [
-      ...new Set(
-        referenced.flatMap(
-          (meta) => meta.incompleteSources ?? (meta.complete ? [] : [meta.tableName]),
-        ),
-      ),
+      ...new Set(referenced.flatMap((meta) => meta.incompleteSources)),
     ].sort();
     const provenance = { complete: incompleteSources.length === 0, incompleteSources };
     if (!options.registerAs || !result.tableName) return { result, providers, ...provenance };
@@ -341,6 +377,7 @@ export class CanvasBridge {
     const [info] = await instance.describe({ tableName: result.tableName });
     const createdAt = Date.now();
     const meta: DataframeMeta = {
+      canvasId: instance.canvasId,
       tableName: result.tableName,
       sourceTool: 'unhcr_dataframe_query',
       queryParams: { sql },
@@ -352,20 +389,27 @@ export class CanvasBridge {
       providers,
       columnSchema: info?.columns ?? [],
     };
-    await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
-    const evicted = await this.evictOverBudget(ctx, instance, meta.tableName);
+    const evicted = await this.recordWithinBudget(ctx, instance, meta);
     return { result, meta, providers, ...provenance, ...(evicted.length > 0 && { evicted }) };
   }
 
-  /** Idempotent drop of the table and its metadata; `true` when either existed. */
+  /** Idempotent drop of the table and its metadata on the live canvas; `true` when either existed. */
   async drop(ctx: Context, name: string): Promise<boolean> {
-    await this.sweepExpired(ctx);
-    const key = `${META_PREFIX}${name}`;
-    const hadMeta = (await ctx.state.get(key)) !== null;
-    await ctx.state.delete(key);
-    const instance = await this.acquireSharedCanvas(ctx);
+    const instance = await this.acquireSharedCanvas(ctx, { create: false });
+    if (!instance) return false;
+    await this.sweepExpired(ctx, instance);
+    const meta = await this.readMeta(ctx, instance, name);
+    if (meta) await ctx.state.delete(`${META_PREFIX}${name}`);
     const dropped = await instance.drop(name);
-    return dropped || hadMeta;
+    return dropped || meta !== undefined;
+  }
+
+  /** The `missing_table` failure for a dataframe that is not staged on the live canvas. */
+  private missingTable(ctx: Context, name: string): McpError {
+    return notFound(
+      `Dataframe ${name} is not staged; it may have expired or been evicted to make room for newer dataframes.`,
+      { reason: 'missing_table', tableName: name, ...ctx.recoveryFor('missing_table') },
+    );
   }
 
   /** Rebuild a gate or engine rejection with the declared reason and its recovery. */
@@ -382,14 +426,12 @@ export class CanvasBridge {
     );
   }
 
-  /** Drop tables whose recorded expiry has passed and delete their metadata. */
-  private async sweepExpired(ctx: Context): Promise<void> {
+  /** Delete metadata whose recorded expiry has passed, dropping the tables that are on `instance`. */
+  private async sweepExpired(ctx: Context, instance: CanvasInstance): Promise<void> {
     const nowIso = new Date().toISOString();
-    let instance: CanvasInstance | undefined;
     for await (const { key, meta } of this.iterateMeta(ctx)) {
       if (meta.expiresAt > nowIso) continue;
-      if (!this.latchedOff) {
-        instance ??= await this.acquireSharedCanvas(ctx);
+      if (meta.canvasId === instance.canvasId) {
         await this.dropTable(ctx, instance, meta.tableName);
       }
       await ctx.state.delete(key);
@@ -397,9 +439,55 @@ export class CanvasBridge {
   }
 
   /**
-   * Drop the tenant's oldest dataframes, never `keep`, until its staged rows
-   * fit the budget, deleting their metadata. Runs once `keep` exists, so its
-   * real row count is counted and the tables its SQL read have been read.
+   * Record a dataframe that exists on `instance`, then evict the tenant's
+   * oldest others while its staged rows exceed the budget. One call at a time
+   * per tenant, so each counts every dataframe recorded before it and two
+   * concurrent ones cannot each evict the other. A table that cannot be
+   * recorded is dropped: the budget would not count it, and no caller has its
+   * name. Returns the evicted names.
+   */
+  private async recordWithinBudget(
+    ctx: Context,
+    instance: CanvasInstance,
+    meta: DataframeMeta,
+  ): Promise<string[]> {
+    let recorded = false;
+    try {
+      return await this.inRecordTurn(instance.tenantId, ctx.signal, async () => {
+        await ctx.state.set(`${META_PREFIX}${meta.tableName}`, meta);
+        recorded = true;
+        return await this.evictOverBudget(ctx, instance, meta.tableName);
+      });
+    } catch (error) {
+      if (!recorded) await this.dropTable(ctx, instance, meta.tableName);
+      throw error;
+    }
+  }
+
+  /** Run `work` alone among a tenant's recordings, rejecting without a turn once `signal` aborts. */
+  private async inRecordTurn<T>(
+    tenantId: string,
+    signal: AbortSignal,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    signal.throwIfAborted();
+    const running = this.recordQueues.get(tenantId);
+    const queue = running ?? [];
+    if (running) await waitInQueue(running, signal);
+    else this.recordQueues.set(tenantId, queue);
+    try {
+      return await work();
+    } finally {
+      const next = queue.shift();
+      if (next) next();
+      else this.recordQueues.delete(tenantId);
+    }
+  }
+
+  /**
+   * Drop the oldest dataframes on `instance`, never `keep`, until its staged
+   * rows fit the budget, deleting their metadata. Runs once `keep` exists, so
+   * its real row count is counted and the tables its SQL read have been read.
    * Returns the evicted names, oldest first. The log line carries a count, not
    * names: under a shared tenant they are other callers' handles.
    */
@@ -409,15 +497,16 @@ export class CanvasBridge {
     keep: string,
   ): Promise<string[]> {
     const staged: { key: string; meta: DataframeMeta }[] = [];
-    for await (const entry of this.iterateMeta(ctx)) staged.push(entry);
+    for await (const entry of this.iterateLiveMeta(ctx, instance)) staged.push(entry);
     let total = staged.reduce((sum, { meta }) => sum + meta.rowCount, 0);
     const evicted: string[] = [];
     staged.sort((a, b) => a.meta.createdAt.localeCompare(b.meta.createdAt));
     for (const { key, meta } of staged) {
       if (total <= this.rowBudget) break;
       if (meta.tableName === keep) continue;
-      await this.dropTable(ctx, instance, meta.tableName);
+      // Metadata first: a cancelled call stops at its next state operation, never with the table gone and its metadata kept.
       await ctx.state.delete(key);
+      await this.dropTable(ctx, instance, meta.tableName);
       total -= meta.rowCount;
       evicted.push(meta.tableName);
     }
@@ -461,33 +550,61 @@ export class CanvasBridge {
     } while (cursor);
   }
 
+  /** Metadata of the dataframes on `instance`. */
+  private async *iterateLiveMeta(
+    ctx: Context,
+    instance: CanvasInstance,
+  ): AsyncGenerator<{ key: string; meta: DataframeMeta }> {
+    for await (const entry of this.iterateMeta(ctx)) {
+      if (entry.meta.canvasId === instance.canvasId) yield entry;
+    }
+  }
+
+  /** One dataframe's metadata, when it is on `instance`. */
+  private async readMeta(
+    ctx: Context,
+    instance: CanvasInstance,
+    name: string,
+  ): Promise<DataframeMeta | undefined> {
+    const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${name}`);
+    return meta?.canvasId === instance.canvasId ? meta : undefined;
+  }
+
+  /** Delete every dataframe's metadata: the canvas the tables were on is gone. */
+  private async purgeMeta(ctx: Context): Promise<void> {
+    const keys: string[] = [];
+    for await (const { key } of this.iterateMeta(ctx)) keys.push(key);
+    if (keys.length > 0) await ctx.state.deleteMany(keys);
+  }
+
   /**
-   * The tenant's shared canvas: the stored id while it is live, a fresh canvas
-   * otherwise. A `ConfigurationError` here is the DuckDB binding failing to
-   * load, latched so no later call tries again.
+   * The tenant's shared canvas, minted when none is live unless `create` is
+   * `false`. Finding none live purges the metadata kept for the dead one,
+   * before any caller obtains a replacement. A `ConfigurationError` here is the
+   * DuckDB binding failing to load, latched so no later call tries again.
    */
-  private async acquireSharedCanvas(ctx: Context): Promise<CanvasInstance> {
+  private async acquireSharedCanvas(ctx: Context): Promise<CanvasInstance>;
+  private async acquireSharedCanvas(
+    ctx: Context,
+    options: { create: false },
+  ): Promise<CanvasInstance | undefined>;
+  private async acquireSharedCanvas(
+    ctx: Context,
+    { create = true }: { create?: boolean } = {},
+  ): Promise<CanvasInstance | undefined> {
     if (this.latchedOff) throw this.unavailableError(ctx);
     try {
-      const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
-      if (stored) {
-        const existing = await this.canvas.acquire(stored, ctx).catch((error: unknown) => {
-          if (error instanceof McpError && error.code === JsonRpcErrorCode.ConfigurationError) {
-            throw error;
-          }
-          return;
-        });
-        if (existing) return existing;
-      }
-      const instance = await this.canvas.acquire(undefined, ctx);
-      await ctx.state.set(CANVAS_ID_KEY, instance.canvasId);
-      return instance;
+      return await this.canvas.acquireShared(ctx, {
+        create,
+        onReplace: () => this.purgeMeta(ctx),
+        stateKey: CANVAS_ID_KEY,
+      });
     } catch (error) {
       if (error instanceof McpError && error.code === JsonRpcErrorCode.ConfigurationError) {
         this.latchedOff = true;
-        ctx.log.warning('DataCanvas unavailable: the DuckDB binding could not load', {
-          error: error.message,
-        });
+        const message = 'DataCanvas unavailable: the DuckDB binding could not load';
+        ctx.log.warning(message);
+        logger.warning(message, withExtra(ctx, { error: errorText(error) }));
         throw this.unavailableError(ctx, error);
       }
       throw error;

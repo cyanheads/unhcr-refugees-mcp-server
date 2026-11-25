@@ -4,7 +4,8 @@
  * Refugee Recognition Rate and Total Protection Rate computed from summed
  * counts over substantive decisions (otherwise-closed cases excluded). All
  * decision levels are summed by default and each row lists the levels it
- * includes; cases and persons are never added together.
+ * includes; cases and persons are never added together. UNHCR's footnotes are
+ * matched to the summed rows.
  * @module mcp-server/tools/definitions/get-asylum-decisions
  */
 
@@ -12,17 +13,27 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { aggregateDecisions } from '@/services/unhcr/asylum-aggregate.js';
 import { DECISION_LEVELS } from '@/services/unhcr/codes.js';
+import { asylumRowTypes, matchFootnotes } from '@/services/unhcr/footnote-match.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { blankAsUnset, codeList, resultInputs, scopeInputs } from '../shared/inputs.js';
+import {
+  blankAsUnset,
+  codeList,
+  resultInputs,
+  scopeInputs,
+  splitByList,
+} from '../shared/inputs.js';
 import { count, table } from '../shared/markdown.js';
 import {
+  asylumEmptyNotice,
   codesCell,
+  codesField,
   countField,
   dataEnrichment,
   identityCells,
   identityFields,
   normalizationNotes,
   renderAsylumLegend,
+  renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
   sharedResultFields,
@@ -38,7 +49,7 @@ function dataNotes(options: {
   yearlessRows: number;
 }): string[] {
   const notes = [
-    'Counts are flows: asylum decisions made during each calendar year.',
+    'Counts are flows: asylum decisions made during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
     'refugee_recognition_rate = recognized ÷ substantive_decisions × 100, and total_protection_rate = (recognized + complementary_protection) ÷ substantive_decisions × 100, UNHCR’s definitions. substantive_decisions = recognized + complementary_protection + rejected, and is null when any of the three is null in any upstream row summed into it, so no rate rests on a partial denominator; otherwise_closed cases are excluded from both rates. Rates are computed from each row’s summed counts and are null when substantive_decisions is 0 or null.',
     'total_decisions sums UNHCR’s published totals, which can differ from the sum of the four outcomes because of rounding.',
     'Rates on small counts are unreliable: counts below 10 are rounded to the nearest multiple of 5.',
@@ -64,13 +75,6 @@ function dataNotes(options: {
   return notes;
 }
 
-const codesField = (dimension: string, list: string) =>
-  z
-    .array(z.string().describe(`One ${dimension} code.`))
-    .describe(
-      `${list} summed into this row; a single code when split_by keeps ${dimension} separate.`,
-    );
-
 const rateField = (description: string) =>
   z
     .number()
@@ -82,6 +86,18 @@ const rateField = (description: string) =>
 /** A rate as a percentage cell; null (a rate that cannot be computed) as an em dash. */
 const percent = (value: number | null) => (value === null ? '—' : `${value.toFixed(1)}%`);
 
+/** This tool's list inputs for one normalize mode. */
+export const decisionLists = (normalize: boolean) => ({
+  split_by: splitByList(['authority', 'decision_level'], normalize, (list) =>
+    list.default([]),
+  ).describe(
+    'Procedure dimensions kept as separate rows: authority (government, UNHCR, or joint) and decision_level (first instance, administrative review, …). Every dimension left out is summed. Default [] sums all authorities and levels, as UNHCR does for its rates. Unit is always kept separate.',
+  ),
+  decision_levels: codeList(DECISION_LEVELS, 'A decision-level code.', normalize).describe(
+    'Keep only these decision levels before summing, case-insensitive: NA new applications, FI first instance, AR administrative review, RA repeat/reopened, IN US Citizenship and Immigration Services, EO US Executive Office for Immigration Review, JR judicial review, SP subsidiary protection, FA first instance and appeal, TP temporary protection, TA temporary asylum, BL backlog, TR temporary leave to remain, CA cantonal regulations (Switzerland). ["FI"] gives first-instance decisions. Omit for every level.',
+  ),
+});
+
 export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
   title: 'UNHCR asylum decisions',
   description:
@@ -90,21 +106,7 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
 
   input: z.object({
     ...scopeInputs,
-    split_by: blankAsUnset(
-      z
-        .array(
-          z
-            .enum(['authority', 'decision_level'])
-            .describe('A procedure dimension to keep separate.'),
-        )
-        .max(2)
-        .default([]),
-    ).describe(
-      'Procedure dimensions kept as separate rows: authority (government, UNHCR, or joint) and decision_level (first instance, administrative review, …). Every dimension left out is summed. Default [] sums all authorities and levels, as UNHCR does for its rates. Unit is always kept separate.',
-    ),
-    decision_levels: codeList(DECISION_LEVELS, 'A decision-level code.').describe(
-      'Keep only these decision levels before summing, case-insensitive: NA new applications, FI first instance, AR administrative review, RA repeat/reopened, IN US Citizenship and Immigration Services, EO US Executive Office for Immigration Review, JR judicial review, SP subsidiary protection, FA first instance and appeal, TP temporary protection, TA temporary asylum, BL backlog, TR temporary leave to remain, CA cantonal regulations (Switzerland). ["FI"] gives first-instance decisions. Omit for every level.',
-    ),
+    ...decisionLists(true),
     sort_by: blankAsUnset(
       z
         .enum(['year', 'total_decisions', 'substantive_decisions', 'recognized', 'rejected'])
@@ -219,7 +221,11 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
     }
 
     const { scope } = resolved;
-    const fetched = await getUnhcrService().asylumDecisions(scope.query, ctx);
+    const service = getUnhcrService();
+    const [fetched, footnotes] = await Promise.all([
+      service.asylumDecisions(scope.query, ctx),
+      service.footnotes(ctx),
+    ]);
     const decisionLevels = input.decision_levels ?? [];
     const aggregated = aggregateDecisions(fetched.rows, {
       splitBy: input.split_by,
@@ -227,13 +233,12 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
     });
     const filter =
       decisionLevels.length > 0 ? `decision_levels=${decisionLevels.join(', ')}` : undefined;
-    let emptyNotice: string | undefined;
-    if (fetched.rows.length > 0 && aggregated.rows.length === 0) {
-      emptyNotice =
-        aggregated.skippedRows > 0
-          ? `UNHCR returned ${aggregated.skippedRows} row(s)${filter ? ` matching ${filter}` : ''}, all with a unit code other than P (persons) or C (cases); they were left out rather than guessed.`
-          : `No rows matched ${filter}. Drop the filter or check the codes with unhcr_list_reference (topic asylum_codes).`;
-    }
+    const emptyNotice = asylumEmptyNotice({
+      aggregatedRows: aggregated.rows.length,
+      fetchedRows: fetched.rows.length,
+      filter,
+      skippedRows: aggregated.skippedRows,
+    });
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_asylum_decisions',
       datasetLabel: 'asylum-decision',
@@ -270,6 +275,7 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
       emptyNotice,
       yearlessRows: fetched.skippedRows,
     });
+    const matched = matchFootnotes(footnotes, finished.sorted, asylumRowTypes, finished.limit);
 
     return {
       ...finished.output,
@@ -281,6 +287,8 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
         unexpectedValues: fetched.unexpectedValues,
         yearlessRows: fetched.skippedRows,
       }),
+      footnotes: matched.footnotes,
+      footnotes_total: matched.total,
     };
   },
 
@@ -341,6 +349,7 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
     } else {
       lines.push('_No rows._', '');
     }
+    lines.push(...renderFootnotes(result.footnotes, result.footnotes_total), '');
     lines.push(...renderNotesAndAttribution(result.data_notes, result.attribution));
     return [{ type: 'text', text: lines.join('\n') }];
   },

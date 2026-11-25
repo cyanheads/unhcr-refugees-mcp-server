@@ -12,7 +12,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
-import { logger, withExtra } from '@cyanheads/mcp-ts-core/utils';
+import { ATTR_MCP_TOOL_NAME, createCounter, logger, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import {
   dataframeGuidance,
   errorText,
@@ -28,7 +28,7 @@ import {
 import type { NowcastRow, RowIdentity } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
 import { clampCount } from './counts.js';
-import { LIMIT_CAP } from './inputs.js';
+import { isNormalizedList, LIMIT_CAP } from './inputs.js';
 import { type AppliedScope, type Attribution, yearSpan } from './outputs.js';
 import type { ResolvedScope } from './scope.js';
 
@@ -398,13 +398,36 @@ async function finishNowcast<R extends RowIdentity>(
   };
 }
 
+const normalizedListCounter = createCounter(
+  'unhcr.list_input.normalized',
+  'Code-list inputs served from a string, or from entries in another case',
+  '{list}',
+);
+
 /**
- * Sort, cut, stage, and explain a data tool's full result. Clamps `limit` at
- * {@link LIMIT_CAP}, then writes the notice (or the truncation disclosure
- * carrying it) through `ctx.enrich`, composing every fragment into one string
- * since `notice` is last-wins. A nowcast, when given, is finished at the same
- * limit and its fragments join that notice; `truncated`, `shown`, and `cap`
- * describe `rows` alone.
+ * Log each list input the schema normalized once at info, and add one to
+ * `unhcr.list_input.normalized` for it, attributed to the tool and field.
+ */
+function recordNormalizedLists(
+  ctx: Context,
+  tool: string,
+  queryParams: Record<string, unknown>,
+): void {
+  for (const [field, effective] of Object.entries(queryParams)) {
+    if (!isNormalizedList(effective)) continue;
+    ctx.log.info('List input normalized', { tool, field, effective });
+    normalizedListCounter.add(1, { [ATTR_MCP_TOOL_NAME]: tool, 'unhcr.list_input.field': field });
+  }
+}
+
+/**
+ * Sort, cut, stage, and explain a data tool's full result. Records the list
+ * inputs the schema normalized and clamps `limit` at {@link LIMIT_CAP}, then
+ * writes the notice (or the truncation disclosure carrying it) through
+ * `ctx.enrich`, composing every fragment into one string since `notice` is
+ * last-wins. A nowcast, when given, is finished at the same limit and its
+ * fragments join that notice; `truncated`, `shown`, and `cap` describe `rows`
+ * alone.
  */
 export async function finishRows<R extends RowIdentity>(
   ctx: Context,
@@ -412,6 +435,7 @@ export async function finishRows<R extends RowIdentity>(
 ): Promise<FinishResult<R>> {
   const sorted = sortRows(input.rows, input.sortBy);
   const total = sorted.length;
+  recordNormalizedLists(ctx, input.sourceTool, input.queryParams);
   const clamp = clampCount(ctx, {
     tool: input.sourceTool,
     field: 'limit',

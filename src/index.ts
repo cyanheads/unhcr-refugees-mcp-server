@@ -42,6 +42,7 @@ await createApp({
   tools: buildToolDefinitions({
     clampLimits: config.clampLimits,
     dropEnabled: config.dataframeDropEnabled,
+    normalizeInputs: config.normalizeInputs,
     rowLimitCap: frameworkConfig.canvas.defaultRowLimit,
   }),
   resources: [],

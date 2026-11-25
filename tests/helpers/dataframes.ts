@@ -54,3 +54,15 @@ export async function carryDataframeState(from: Context, to: Context): Promise<v
     cursor = page.cursor;
   } while (cursor);
 }
+
+/** `tool` running against the dataframes an earlier call, on the `source` context, staged. */
+export const seededFrom = <T extends { handler: (input: never, ctx: never) => unknown }>(
+  tool: T,
+  source: Context,
+): T => ({
+  ...tool,
+  handler: async (input: never, ctx: never) => {
+    await carryDataframeState(source, ctx);
+    return tool.handler(input, ctx);
+  },
+});

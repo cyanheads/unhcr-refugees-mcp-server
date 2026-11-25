@@ -1104,7 +1104,7 @@ export const footnoteRow = (spec: FootnoteSpec): RawRow => {
     if (iso === null) {
       return { [prefix]: ' ', [`${prefix}_id`]: 278, [`${prefix}_iso`]: '' };
     }
-    const row = COUNTRY_ROWS.find((candidate) => candidate.iso === iso);
+    const row = [...COUNTRY_ROWS, USA_COUNTRY_ROW].find((candidate) => candidate.iso === iso);
     return {
       [prefix]: row ? row.name : iso,
       [`${prefix}_id`]: row ? row.id : 0,
@@ -1204,6 +1204,174 @@ export const FOOTNOTE_ROWS: RawRow[] = [
   }),
   // Illustrative: an entry with no text, which the service drops.
   footnoteRow({ footnote: '   ', year: '2024', coo: null, coa: null, population_type: 'REF' }),
+];
+
+/** The caveat that makes every US asylum figure for 2024 a half year, verbatim. */
+export const USA_2024_FOOTNOTE_TEXT =
+  'All statistics reported by the United States of America apart from resettlement arrivals are as of mid-2024. Hence, the data of new applications and decisions only include the period between January and June 2024, and the number of pending applications is as of 30 June 2024. The full year statistics for each of these are likely to be higher.';
+
+/**
+ * The `/footnotes/` rows a US asylum-country query over 2016–2025 has to sort
+ * through, in UNHCR's order (texts abridged, except 2024's): every row naming
+ * the US as asylum country, the one naming it as origin, and the two that name
+ * no country. Kept out of {@link FOOTNOTE_ROWS}, whose span the reference
+ * tests pin.
+ */
+export const USA_FOOTNOTE_ROWS: RawRow[] = [
+  footnoteRow({
+    footnote: 'The United States of America has also offered temporary status.',
+    year: '2023 - 2024',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF',
+  }),
+  footnoteRow({
+    footnote:
+      'Asylum applications which are reported as cases can be multiplied overall by average number of person per case of 1.5 when summarising the data by country of asylum, but not origin.',
+    year: '2020',
+    coo: null,
+    coa: 'USA',
+    population_type: 'ASY',
+  }),
+  footnoteRow({
+    footnote: 'USCIS data is reported as cases from January to September 2025.',
+    year: '2025',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF,ASY',
+  }),
+  footnoteRow({
+    footnote: 'An improved methodology to estimate the number of refugees.',
+    year: '2022',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF',
+  }),
+  footnoteRow({
+    footnote:
+      'A limited number of countries record refugee and asylum statistics by country of birth rather than country of origin.',
+    year: '2015 - 2026',
+    coo: 'USA',
+    coa: null,
+    population_type: 'REF,ASY,ROC,IDP,IOC,STA,OOC,RET,RDP,HST,OIP,RST,NAT',
+  }),
+  footnoteRow({
+    footnote:
+      'Asylum applications and pending figures are adjusted with the average number of person per case(1.46).',
+    year: '2016',
+    coo: null,
+    coa: 'USA',
+    population_type: 'ASY',
+  }),
+  footnoteRow({
+    footnote: 'USCIS shared the 2021 asylum data expressed in terms of individuals.',
+    year: '2021',
+    coo: null,
+    coa: 'USA',
+    population_type: 'ASY',
+  }),
+  footnoteRow({
+    footnote: 'The United States of America has not adopted a statelessness determination.',
+    year: '2018 - 2026',
+    coo: null,
+    coa: 'USA',
+    population_type: 'STA',
+  }),
+  footnoteRow({
+    footnote:
+      'Asylum applications which are reported as cases can be multiplied overall by average number of person per case of 1.501 when summarising the data by country of asylum, but not origin.',
+    year: '2018 - 2019',
+    coo: null,
+    coa: 'USA',
+    population_type: 'ASY',
+  }),
+  footnoteRow({
+    footnote:
+      'The data are generally provided by governments, based on their own definitions and methods of data collection.',
+    year: '2019 - 2022',
+    coo: null,
+    coa: null,
+    population_type: 'REF,ROC,ASY,IDP,IOC,STA,OOC,RET,RDP,HST,OIP,RST,NAT',
+  }),
+  footnoteRow({
+    footnote: 'The refugee figure is currently under review.',
+    year: '2015',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF',
+  }),
+  footnoteRow({
+    footnote: 'Small values between zero and five have been rounded to multiples of five.',
+    year: '2019 - 2022',
+    coo: null,
+    coa: null,
+    population_type: 'REF,ROC,ASY,IDP,IOC,STA,OOC,RET,RDP,HST,OIP,RST,NAT',
+  }),
+  footnoteRow({
+    footnote: 'USCIS data is reported as cases, on this basis UNHCR counts one person per case.',
+    year: '2026',
+    coo: null,
+    coa: 'USA',
+    population_type: 'ASY',
+  }),
+  footnoteRow({
+    footnote: USA_2024_FOOTNOTE_TEXT,
+    year: '2024',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF,ROC,ASY,IDP,IOC,STA,OOC,RET,RDP,HST,OIP,RST,NAT',
+  }),
+  footnoteRow({
+    footnote: 'In 2022, a significant number of Ukrainians were given temporary protection.',
+    year: '2022',
+    coo: null,
+    coa: 'USA',
+    population_type: 'REF,ROC,ASY,IDP,IOC,STA,OOC,RET,RDP,HST,OIP,RST,NAT',
+  }),
+];
+
+/**
+ * Asylum USA applications, 2017–2025, continuing the 2015–2016 rows of
+ * {@link ASYLUM_APPLICATION_ROWS}: appeals beside new claims, and USCIS rows
+ * in cases through 2020 and again in 2025.
+ */
+export const USA_APPLICATION_ROWS: RawRow[] = [
+  applicationRow(2017, null, 'USA', ['G', 'N', 'EO', 'P', 123377]),
+  applicationRow(2017, null, 'USA', ['G', 'N', 'IN', 'C', 138762]),
+  applicationRow(2017, null, 'USA', ['G', 'A', 'AR', 'P', 3038]),
+  applicationRow(2018, null, 'USA', ['G', 'A', 'AR', 'P', 54814]),
+  applicationRow(2018, null, 'USA', ['G', 'N', 'EO', 'P', 109322]),
+  applicationRow(2018, null, 'USA', ['G', 'N', 'IN', 'C', 96555]),
+  applicationRow(2019, null, 'USA', ['G', 'A', 'AR', 'P', 59699]),
+  applicationRow(2019, null, 'USA', ['G', 'N', 'EO', 'P', 166731]),
+  applicationRow(2019, null, 'USA', ['G', 'N', 'IN', 'C', 89467]),
+  applicationRow(2020, null, 'USA', ['G', 'A', 'AR', 'P', 31342]),
+  applicationRow(2020, null, 'USA', ['G', 'N', 'EO', 'P', 119300]),
+  applicationRow(2020, null, 'USA', ['G', 'N', 'IN', 'C', 87678]),
+  applicationRow(2021, null, 'USA', ['G', 'A', 'AR', 'P', 21628]),
+  applicationRow(2021, null, 'USA', ['G', 'N', 'EO', 'P', 71325]),
+  applicationRow(2021, null, 'USA', ['G', 'N', 'IN', 'P', 117535]),
+  applicationRow(2022, null, 'USA', ['G', 'A', 'AR', 'P', 22294]),
+  applicationRow(2022, null, 'USA', ['G', 'N', 'EO', 'P', 298986]),
+  applicationRow(2022, null, 'USA', ['G', 'N', 'IN', 'P', 431412]),
+  applicationRow(2023, null, 'USA', ['G', 'A', 'AR', 'P', 13115]),
+  applicationRow(2023, null, 'USA', ['G', 'N', 'EO', 'P', 533034]),
+  applicationRow(2023, null, 'USA', ['G', 'N', 'IN', 'P', 643017]),
+  applicationRow(2024, null, 'USA', ['G', 'A', 'AR', 'P', 4807]),
+  applicationRow(2024, null, 'USA', ['G', 'N', 'EO', 'P', 436517]),
+  applicationRow(2024, null, 'USA', ['G', 'N', 'IN', 'P', 292588]),
+  applicationRow(2025, null, 'USA', ['G', 'N', 'EO', 'P', 629358]),
+  applicationRow(2025, null, 'USA', ['G', 'N', 'IN', 'C', 282594]),
+];
+
+/** Asylum USA decisions, 2023–2024, beside the 2015–2016 rows of {@link ASYLUM_DECISION_ROWS}. */
+export const USA_DECISION_ROWS: RawRow[] = [
+  decisionRow(2023, null, 'USA', ['G', 'AR', 'P'], [8145, '0', 2918, 26183, 37246]),
+  decisionRow(2023, null, 'USA', ['G', 'EO', 'P'], [24689, '0', 31115, 129859, 185663]),
+  decisionRow(2023, null, 'USA', ['G', 'IN', 'P'], [31234, '0', 11430, 53952, 96616]),
+  decisionRow(2024, null, 'USA', ['G', 'AR', 'P'], [3265, '0', 1106, 11910, 16281]),
+  decisionRow(2024, null, 'USA', ['G', 'EO', 'P'], [14806, '0', 19712, 86138, 120656]),
+  decisionRow(2024, null, 'USA', ['G', 'IN', 'P'], [17630, '0', 5392, 99490, 122512]),
 ];
 
 /**

@@ -6,14 +6,16 @@
  * tool's prose routes callers to the off-by-default drop tool, and the
  * annotations match the design. Later tools are not pinned, except for the
  * log severity every tool declares per error reason, the length and size
- * bound every string and array input carries, and the count inputs' bounds,
- * which `UNHCR_CLAMP_LIMITS` and the canvas row cap set per deployment — with
- * every other field of a rebuilt data tool left as its module definition.
+ * bound every string and array input carries, the count inputs' bounds, which
+ * `UNHCR_CLAMP_LIMITS` and the canvas row cap set per deployment, and what the
+ * list inputs read in each `UNHCR_NORMALIZE_INPUTS` mode — with every other
+ * field of a rebuilt data tool left as its module definition.
  * @module tests/tools/definitions.test
  */
 
-import { disabledTool, z } from '@cyanheads/mcp-ts-core';
+import { disabledTool, tool, z } from '@cyanheads/mcp-ts-core';
 import type { ErrorContract } from '@cyanheads/mcp-ts-core/errors';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
@@ -26,6 +28,7 @@ import { getSolutionsTool } from '@/mcp-server/tools/definitions/get-solutions.t
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { DATAFRAME_NAME_LENGTH } from '@/services/canvas-bridge/canvas-bridge.js';
+import { errorOf, structuredOf } from '../helpers/results.js';
 
 /** The JSON Schema keywords the input-bounds walk reads. */
 interface SchemaNode {
@@ -68,21 +71,21 @@ const WAVE_1 = [
   dataframeQueryTool,
 ];
 
-/** The default deployment's count bounds: clamping on, the canvas's default row cap. */
-const COUNTS = { clampLimits: true, rowLimitCap: 10_000 };
+/** The default deployment: clamping and input normalization on, the canvas's default row cap. */
+const DEFAULTS = { clampLimits: true, normalizeInputs: true, rowLimitCap: 10_000 };
 
 describe('buildToolDefinitions', () => {
   it.each([true, false])(
     'registers every Wave 1 data and dataframe tool (drop enabled: %s)',
     (dropEnabled) => {
-      const names = buildToolDefinitions({ ...COUNTS, dropEnabled }).map((tool) => tool.name);
+      const names = buildToolDefinitions({ ...DEFAULTS, dropEnabled }).map((tool) => tool.name);
       for (const tool of WAVE_1) expect(names).toContain(tool.name);
       expect(new Set(names).size).toBe(names.length);
     },
   );
 
   it('registers the drop tool live when drop is enabled', () => {
-    const tools = buildToolDefinitions({ ...COUNTS, dropEnabled: true });
+    const tools = buildToolDefinitions({ ...DEFAULTS, dropEnabled: true });
     expect(tools.filter((tool) => tool.name === 'unhcr_dataframe_drop')).toEqual([
       dataframeDropTool,
     ]);
@@ -90,7 +93,7 @@ describe('buildToolDefinitions', () => {
   });
 
   it('wraps the drop tool with disabledTool, naming the setting, when drop is disabled', () => {
-    const tools = buildToolDefinitions({ ...COUNTS, dropEnabled: false });
+    const tools = buildToolDefinitions({ ...DEFAULTS, dropEnabled: false });
     const drop = tools.find((tool) => tool.name === 'unhcr_dataframe_drop');
     expect(drop).not.toBe(dataframeDropTool);
     expect(drop).toEqual(
@@ -102,7 +105,7 @@ describe('buildToolDefinitions', () => {
   });
 
   it('keeps every tool name in the unhcr_ namespace', () => {
-    for (const tool of buildToolDefinitions({ ...COUNTS, dropEnabled: true })) {
+    for (const tool of buildToolDefinitions({ ...DEFAULTS, dropEnabled: true })) {
       expect(tool.name).toMatch(/^unhcr_[a-z_]+$/);
     }
   });
@@ -112,7 +115,7 @@ describe('count inputs', () => {
   /** Each tool's count inputs as `tools/list` advertises them. */
   const countSchemas = (options: { clampLimits: boolean; rowLimitCap: number }) =>
     Object.fromEntries(
-      buildToolDefinitions({ ...options, dropEnabled: false }).flatMap((tool) => {
+      buildToolDefinitions({ ...DEFAULTS, ...options, dropEnabled: false }).flatMap((tool) => {
         const { properties = {} } = z.toJSONSchema(tool.input, { io: 'input' }) as {
           properties?: Record<string, Record<string, unknown>>;
         };
@@ -131,7 +134,7 @@ describe('count inputs', () => {
   ];
 
   it('advertises integers with no maximum by default, at the default canvas row cap', () => {
-    const schemas = countSchemas(COUNTS);
+    const schemas = countSchemas(DEFAULTS);
     expect(Object.keys(schemas).sort()).toEqual(
       [
         ...DATA_TOOLS.map((tool) => `${tool}.limit`),
@@ -166,7 +169,7 @@ describe('count inputs', () => {
 
   it('rejects an over-cap limit at the schema only in strict mode', () => {
     const population = (clampLimits: boolean) =>
-      buildToolDefinitions({ clampLimits, rowLimitCap: 10_000, dropEnabled: false }).find(
+      buildToolDefinitions({ ...DEFAULTS, clampLimits, dropEnabled: false }).find(
         (tool) => tool.name === 'unhcr_get_population',
       );
     expect(population(true)?.input.safeParse({ limit: 2_001 }).success).toBe(true);
@@ -174,11 +177,16 @@ describe('count inputs', () => {
     expect(population(false)?.input.safeParse({ limit: 2_000 }).success).toBe(true);
   });
 
-  it.each([true, false])(
-    'registers each data tool as its own definition with only limit swapped (clamping %s)',
-    (clampLimits) => {
+  it.each([
+    [true, true],
+    [false, true],
+    [true, false],
+  ])(
+    'registers each data tool as its own definition, advertising only another limit (clamping %s, normalizing %s)',
+    (clampLimits, normalizeInputs) => {
       const registered = buildToolDefinitions({
         clampLimits,
+        normalizeInputs,
         rowLimitCap: 10_000,
         dropEnabled: false,
       });
@@ -206,6 +214,301 @@ describe('count inputs', () => {
       }
     },
   );
+});
+
+describe('list inputs', () => {
+  const APPLICATIONS = 'unhcr_get_asylum_applications';
+  const DECISIONS = 'unhcr_get_asylum_decisions';
+  const DEMOGRAPHICS = 'unhcr_get_demographics';
+
+  /**
+   * What a deployment's registered tool makes of one list argument, through the
+   * argument parse a client's call takes: the parsed list, null when it is
+   * unset, or the rejection.
+   */
+  const read = async (
+    toolName: string,
+    field: string,
+    value: unknown,
+    normalizeInputs: boolean,
+  ): Promise<readonly string[] | string | null> => {
+    const definition = buildToolDefinitions({
+      ...DEFAULTS,
+      normalizeInputs,
+      dropEnabled: false,
+    }).find(({ name }) => name === toolName);
+    const probe = tool(toolName, {
+      description: 'Echoes one parsed list input.',
+      input: definition!.input as z.ZodObject<z.ZodRawShape>,
+      output: z.object({
+        parsed: z.array(z.string()).nullable().describe('The parsed list, null when unset.'),
+      }),
+      handler: (input) => ({ parsed: (input[field] as string[] | undefined) ?? null }),
+    });
+    const result = await runToolContract(probe, { [field]: value });
+    return result.isError
+      ? errorOf(result).message
+      : (structuredOf(result).parsed as string[] | null);
+  };
+
+  /** The rejection of one list input, as a client reads it. */
+  const rejected = (toolName: string, issue: string) =>
+    `Input validation error: Invalid arguments for tool ${toolName}: ${issue}`;
+
+  const ALL_STAGES = 'N,R,A,NA,NR,FA,J,BL,SP,V,RA';
+  const stageIssue = (issue: string) => rejected(APPLICATIONS, issue);
+  const stageList = stageIssue('stages: Invalid input: expected array, received string');
+  const unknownStage = (index: number) =>
+    stageIssue(
+      `stages.${index}: Invalid option: expected one of "N"|"R"|"A"|"NA"|"NR"|"FA"|"J"|"BL"|"SP"|"V"|"RA"`,
+    );
+  const tooManyStages = stageIssue('stages: Too big: expected array to have <=11 items');
+
+  /** A `stages` argument, what it reads as by default, and what it reads as with normalization off. */
+  const STAGE_INPUTS: [value: unknown, normalized: unknown, strict: unknown][] = [
+    // A string reads as the array of the codes in it.
+    ['N', ['N'], stageList],
+    ['n', ['N'], stageList],
+    [' N ', ['N'], stageList],
+    ['N,R', ['N', 'R'], stageList],
+    ['N, R', ['N', 'R'], stageList],
+    ['N R', ['N', 'R'], stageList],
+    ['N\nr\tna', ['N', 'R', 'NA'], stageList],
+    ['N,', ['N'], stageList],
+    [',N,,R ,', ['N', 'R'], stageList],
+    ['N,N', ['N', 'N'], stageList],
+    ['N R', ['N', 'R'], stageList],
+    [ALL_STAGES, ALL_STAGES.split(','), stageList],
+    // No code at all is no filter.
+    [',', null, stageList],
+    [' , ,', null, stageList],
+    // One bad code rejects the string at that code's index, as in an array.
+    ['ZZ', unknownStage(0), stageList],
+    ['N,ZZ', unknownStage(1), stageList],
+    ['N;R', unknownStage(0), stageList],
+    ['N|R', unknownStage(0), stageList],
+    ["'N'", unknownStage(0), stageList],
+    ['"N"', unknownStage(0), stageList],
+    ['{"a":"N"}', unknownStage(0), stageList],
+    [`${ALL_STAGES},N`, tooManyStages, stageList],
+    // An encoded array is the framework's to decode.
+    ['["N"]', ['N'], ['N']],
+    ['["N","R"]', ['N', 'R'], ['N', 'R']],
+    ['["n"]', ['N'], ['N']],
+    [' ["N"]', ['N'], ['N']],
+    ['[]', [], []],
+    ['[ ]', [], []],
+    ['[N]', stageList, stageList],
+    ['["N,R"]', stageList, stageList],
+    ['[""]', stageList, stageList],
+    // Blanks, null, and arrays.
+    ['', null, null],
+    ['  ', null, null],
+    [null, null, null],
+    [[], [], []],
+    [['n'], ['N'], ['N']],
+    [[' N '], ['N'], ['N']],
+    [
+      ['N', 'N'],
+      ['N', 'N'],
+      ['N', 'N'],
+    ],
+    [['N', 'ZZ'], unknownStage(1), unknownStage(1)],
+    [['N,R'], unknownStage(0), unknownStage(0)],
+    [['N', ''], unknownStage(1), unknownStage(1)],
+    [['N', 5], unknownStage(1), unknownStage(1)],
+    [[...ALL_STAGES.split(','), 'N'], tooManyStages, tooManyStages],
+    // Anything else keeps the array's own message.
+    ...[
+      [5, 'number'],
+      [true, 'boolean'],
+      [{}, 'object'],
+    ].map(([value, type]): [unknown, unknown, unknown] => {
+      const issue = stageIssue(`stages: Invalid input: expected array, received ${type}`);
+      return [value, issue, issue];
+    }),
+  ];
+
+  it.each(STAGE_INPUTS)('reads a code filter of %j', async (value, normalized, strict) => {
+    expect(await read(APPLICATIONS, 'stages', value, true), 'normalizing').toEqual(normalized);
+    expect(await read(APPLICATIONS, 'stages', value, false), 'strict').toEqual(strict);
+  });
+
+  const splitIssue = (issue: string) => rejected(APPLICATIONS, issue);
+  const splitList = splitIssue('split_by: Invalid input: expected array, received string');
+  const unknownSplit = splitIssue(
+    'split_by.0: Invalid option: expected one of "authority"|"stage"|"decision_level"',
+  );
+  const tooManySplits = splitIssue('split_by: Too big: expected array to have <=3 items');
+
+  /** A `split_by` argument (default `["stage"]`), by default and with normalization off. */
+  const SPLIT_INPUTS: [value: unknown, normalized: unknown, strict: unknown][] = [
+    // A string or an array reads in any case.
+    ['stage', ['stage'], splitList],
+    ['Stage', ['stage'], splitList],
+    [' authority ', ['authority'], splitList],
+    ['Decision_Level, STAGE', ['decision_level', 'stage'], splitList],
+    ['stage authority', ['stage', 'authority'], splitList],
+    ['stage,', ['stage'], splitList],
+    ['stage,stage', ['stage', 'stage'], splitList],
+    ['authority,stage,decision_level', ['authority', 'stage', 'decision_level'], splitList],
+    [['Stage'], ['stage'], unknownSplit],
+    [[' authority '], ['authority'], unknownSplit],
+    ['["Stage"]', ['stage'], splitList],
+    // "" is the default and "[]" no split, so a string naming no dimension is neither.
+    ['', ['stage'], ['stage']],
+    ['  ', ['stage'], ['stage']],
+    [null, ['stage'], ['stage']],
+    ['[]', [], []],
+    ['[ ]', [], []],
+    [[], [], []],
+    [',', splitList, splitList],
+    [' , ,', splitList, splitList],
+    // An array already in the enum's case.
+    [
+      ['authority', 'authority'],
+      ['authority', 'authority'],
+      ['authority', 'authority'],
+    ],
+    [
+      '["authority","decision_level"]',
+      ['authority', 'decision_level'],
+      ['authority', 'decision_level'],
+    ],
+    // Nothing outside the enum.
+    ['none', unknownSplit, splitList],
+    ['unit', unknownSplit, splitList],
+    ['authority;stage', unknownSplit, splitList],
+    [['unit'], unknownSplit, unknownSplit],
+    ['[authority]', splitList, splitList],
+    ['authority,stage,decision_level,stage', tooManySplits, splitList],
+    [['stage', 'stage', 'stage', 'stage'], tooManySplits, tooManySplits],
+    ...[
+      [5, 'number'],
+      [true, 'boolean'],
+      [{}, 'object'],
+    ].map(([value, type]): [unknown, unknown, unknown] => {
+      const issue = splitIssue(`split_by: Invalid input: expected array, received ${type}`);
+      return [value, issue, issue];
+    }),
+  ];
+
+  it.each(SPLIT_INPUTS)('reads a split of %j', async (value, normalized, strict) => {
+    expect(await read(APPLICATIONS, 'split_by', value, true), 'normalizing').toEqual(normalized);
+    expect(await read(APPLICATIONS, 'split_by', value, false), 'strict').toEqual(strict);
+  });
+
+  it.each([
+    [DECISIONS, 'decision_levels', 'fi, ra', ['FI', 'RA']],
+    [DECISIONS, 'split_by', 'Authority', ['authority']],
+    [DEMOGRAPHICS, 'population_types', 'ref asy', ['REF', 'ASY']],
+  ])('rebuilds %s.%s for each mode', async (toolName, field, value, parsed) => {
+    expect(await read(toolName, field, value, true)).toEqual(parsed);
+    expect(await read(toolName, field, value, false)).toBe(
+      rejected(toolName, `${field}: Invalid input: expected array, received string`),
+    );
+  });
+
+  it('gives a blank or "[]" decisions split no dimension, its default', async () => {
+    for (const value of ['', '[]', []]) {
+      expect(await read(DECISIONS, 'split_by', value, true)).toEqual([]);
+    }
+  });
+
+  /** Each tool's list inputs as `tools/list` advertises them, description aside. */
+  const listSchemas = (normalizeInputs: boolean) =>
+    Object.fromEntries(
+      buildToolDefinitions({ ...DEFAULTS, normalizeInputs, dropEnabled: false }).flatMap((tool) => {
+        const { properties = {} } = z.toJSONSchema(tool.input, { io: 'input' }) as {
+          properties?: Record<string, { description?: string }>;
+        };
+        return ['split_by', 'stages', 'decision_levels', 'population_types']
+          .filter((field) => field in properties)
+          .map((field) => {
+            const { description: _description, ...schema } = properties[field]!;
+            return [`${tool.name}.${field}`, schema];
+          });
+      }),
+    );
+
+  it.each([true, false])(
+    'advertises every list as an array of its codes alone (normalizing %s)',
+    (normalizeInputs) => {
+      const dimension = 'A procedure dimension to keep separate.';
+      expect(listSchemas(normalizeInputs)).toStrictEqual({
+        [`${APPLICATIONS}.split_by`]: {
+          default: ['stage'],
+          maxItems: 3,
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['authority', 'stage', 'decision_level'],
+            description: dimension,
+          },
+        },
+        [`${APPLICATIONS}.stages`]: {
+          maxItems: 11,
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['N', 'R', 'A', 'NA', 'NR', 'FA', 'J', 'BL', 'SP', 'V', 'RA'],
+            description: 'An application-stage code.',
+          },
+        },
+        [`${DECISIONS}.split_by`]: {
+          default: [],
+          maxItems: 2,
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['authority', 'decision_level'],
+            description: dimension,
+          },
+        },
+        [`${DECISIONS}.decision_levels`]: {
+          maxItems: 14,
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: [
+              'NA',
+              'FI',
+              'AR',
+              'RA',
+              'IN',
+              'EO',
+              'JR',
+              'SP',
+              'FA',
+              'TP',
+              'TA',
+              'BL',
+              'TR',
+              'CA',
+            ],
+            description: 'A decision-level code.',
+          },
+        },
+        [`${DEMOGRAPHICS}.population_types`]: {
+          maxItems: 9,
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['REF', 'ASY', 'OIP', 'IDP', 'STA', 'OOC', 'HST', 'RET', 'RDP'],
+            description: 'A population-type code.',
+          },
+        },
+      });
+    },
+  );
+
+  it('advertises byte-identical input schemas with normalization on and off', () => {
+    const schemas = (normalizeInputs: boolean) =>
+      buildToolDefinitions({ ...DEFAULTS, normalizeInputs, dropEnabled: true }).map((tool) =>
+        JSON.stringify(z.toJSONSchema(tool.input, { io: 'input' })),
+      );
+    expect(schemas(false)).toEqual(schemas(true));
+  });
 });
 
 describe('Wave 1 declared surface', () => {
@@ -249,7 +552,7 @@ describe('Wave 1 declared surface', () => {
 
 describe('input bounds', () => {
   it('bounds every string and array input on every tool', () => {
-    const unbounded = buildToolDefinitions({ ...COUNTS, dropEnabled: true }).flatMap((tool) =>
+    const unbounded = buildToolDefinitions({ ...DEFAULTS, dropEnabled: true }).flatMap((tool) =>
       unboundedNodes(z.toJSONSchema(tool.input, { io: 'input' }) as SchemaNode, tool.name),
     );
     expect(unbounded).toEqual([]);
@@ -282,7 +585,7 @@ describe('error log severity', () => {
 
   it('logs caller mistakes at notice and dataframes being off at warning; upstream_busy stays at error', () => {
     const severities = Object.fromEntries(
-      buildToolDefinitions({ ...COUNTS, dropEnabled: true }).map((tool) => {
+      buildToolDefinitions({ ...DEFAULTS, dropEnabled: true }).map((tool) => {
         const entries: readonly ErrorContract[] = tool.errors ?? [];
         return [
           tool.name,

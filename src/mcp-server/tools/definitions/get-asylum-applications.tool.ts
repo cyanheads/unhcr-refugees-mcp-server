@@ -4,7 +4,7 @@
  * are split by authority × application stage × decision level × unit; the
  * tool sums over the dimensions `split_by` leaves out (stage stays split by
  * default, so new claims are not added to appeals) and never adds cases to
- * persons.
+ * persons. UNHCR's footnotes are matched to the summed rows.
  * @module mcp-server/tools/definitions/get-asylum-applications
  */
 
@@ -12,17 +12,27 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { aggregateApplications } from '@/services/unhcr/asylum-aggregate.js';
 import { APPLICATION_STAGES } from '@/services/unhcr/codes.js';
+import { asylumRowTypes, matchFootnotes } from '@/services/unhcr/footnote-match.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { blankAsUnset, codeList, resultInputs, scopeInputs } from '../shared/inputs.js';
+import {
+  blankAsUnset,
+  codeList,
+  resultInputs,
+  scopeInputs,
+  splitByList,
+} from '../shared/inputs.js';
 import { count, table } from '../shared/markdown.js';
 import {
+  asylumEmptyNotice,
   codesCell,
+  codesField,
   countField,
   dataEnrichment,
   identityCells,
   identityFields,
   normalizationNotes,
   renderAsylumLegend,
+  renderFootnotes,
   renderNotesAndAttribution,
   renderResultHeader,
   sharedResultFields,
@@ -37,7 +47,7 @@ function dataNotes(options: {
   yearlessRows: number;
 }): string[] {
   const notes = [
-    'Counts are flows: asylum applications lodged during each calendar year.',
+    'Counts are flows: asylum applications lodged during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
     'Each row states its unit. Some countries report cases, where one case can cover several people; counts of cases are never added to counts of persons.',
     'authorities, stages, and decision_levels list the codes summed into each row; decode them with unhcr_list_reference (topic asylum_codes).',
     'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
@@ -57,12 +67,17 @@ function dataNotes(options: {
   return notes;
 }
 
-const codesField = (dimension: string, list: string) =>
-  z
-    .array(z.string().describe(`One ${dimension} code.`))
-    .describe(
-      `${list} summed into this row; a single code when split_by keeps ${dimension} separate.`,
-    );
+/** This tool's list inputs for one normalize mode. */
+export const applicationLists = (normalize: boolean) => ({
+  split_by: splitByList(['authority', 'stage', 'decision_level'], normalize, (list) =>
+    list.default(['stage']),
+  ).describe(
+    'Procedure dimensions kept as separate rows: authority (government, UNHCR, or joint), stage (new, repeat, appeal, …), decision_level. Every dimension left out is summed. Default ["stage"]; [] gives one total per year and scope for each unit. Unit is always kept separate.',
+  ),
+  stages: codeList(APPLICATION_STAGES, 'An application-stage code.', normalize).describe(
+    'Keep only these application stages before summing, case-insensitive: N new, R repeat, A appeal, NA new and appeal together, NR new and repeat together, FA first and appeal, J judiciary, BL backlog, SP subsidiary protection; V and RA appear in the data without a published definition. ["N"] gives new applications only, the basis of UNHCR\'s headline figure. Omit for every stage.',
+  ),
+});
 
 export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
   title: 'UNHCR asylum applications',
@@ -72,21 +87,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
 
   input: z.object({
     ...scopeInputs,
-    split_by: blankAsUnset(
-      z
-        .array(
-          z
-            .enum(['authority', 'stage', 'decision_level'])
-            .describe('A procedure dimension to keep separate.'),
-        )
-        .max(3)
-        .default(['stage']),
-    ).describe(
-      'Procedure dimensions kept as separate rows: authority (government, UNHCR, or joint), stage (new, repeat, appeal, …), decision_level. Every dimension left out is summed. Default ["stage"]; [] gives one total per year and scope for each unit. Unit is always kept separate.',
-    ),
-    stages: codeList(APPLICATION_STAGES, 'An application-stage code.').describe(
-      'Keep only these application stages before summing, case-insensitive: N new, R repeat, A appeal, NA new and appeal together, NR new and repeat together, FA first and appeal, J judiciary, BL backlog, SP subsidiary protection; V and RA appear in the data without a published definition. ["N"] gives new applications only, the basis of UNHCR\'s headline figure. Omit for every stage.',
-    ),
+    ...applicationLists(true),
     sort_by: blankAsUnset(z.enum(['year', 'applied']).default('year')).describe(
       'Order of the full result before the inline cut. year (default) orders by year, then origin ISO3, then asylum ISO3; applied orders largest first, nulls last.',
     ),
@@ -179,17 +180,20 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
     }
 
     const { scope } = resolved;
-    const fetched = await getUnhcrService().asylumApplications(scope.query, ctx);
+    const service = getUnhcrService();
+    const [fetched, footnotes] = await Promise.all([
+      service.asylumApplications(scope.query, ctx),
+      service.footnotes(ctx),
+    ]);
     const stages = input.stages ?? [];
     const aggregated = aggregateApplications(fetched.rows, { splitBy: input.split_by, stages });
     const filter = stages.length > 0 ? `stages=${stages.join(', ')}` : undefined;
-    let emptyNotice: string | undefined;
-    if (fetched.rows.length > 0 && aggregated.rows.length === 0) {
-      emptyNotice =
-        aggregated.skippedRows > 0
-          ? `UNHCR returned ${aggregated.skippedRows} row(s)${filter ? ` matching ${filter}` : ''}, all with a unit code other than P (persons) or C (cases); they were left out rather than guessed.`
-          : `No rows matched ${filter}. Drop the filter or check the codes with unhcr_list_reference (topic asylum_codes).`;
-    }
+    const emptyNotice = asylumEmptyNotice({
+      aggregatedRows: aggregated.rows.length,
+      fetchedRows: fetched.rows.length,
+      filter,
+      skippedRows: aggregated.skippedRows,
+    });
     const finished = await finishRows(ctx, {
       sourceTool: 'unhcr_get_asylum_applications',
       datasetLabel: 'asylum-application',
@@ -213,6 +217,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
       emptyNotice,
       yearlessRows: fetched.skippedRows,
     });
+    const matched = matchFootnotes(footnotes, finished.sorted, asylumRowTypes, finished.limit);
 
     return {
       ...finished.output,
@@ -223,6 +228,8 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
         unexpectedValues: fetched.unexpectedValues,
         yearlessRows: fetched.skippedRows,
       }),
+      footnotes: matched.footnotes,
+      footnotes_total: matched.total,
     };
   },
 
@@ -267,6 +274,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
     } else {
       lines.push('_No rows._', '');
     }
+    lines.push(...renderFootnotes(result.footnotes, result.footnotes_total), '');
     lines.push(...renderNotesAndAttribution(result.data_notes, result.attribution));
     return [{ type: 'text', text: lines.join('\n') }];
   },

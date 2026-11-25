@@ -28,7 +28,6 @@ import {
   countryCell,
   dataEnrichment,
   datasetSchema,
-  footnoteSchema,
   identityCells,
   identityFields,
   normalizationNotes,
@@ -240,12 +239,6 @@ export const getPopulationTool = tool('unhcr_get_population', {
       )
       .describe('Inline rows, sorted, up to limit.'),
     ...sharedResultFields,
-    footnotes: z
-      .array(footnoteSchema)
-      .describe(
-        'UNHCR caveats matching rows of the full result, at most 20. Caveats on inline rows come before those only on rows past the cut; within each group, country-specific first, then in the order of the first row each matches.',
-      ),
-    footnotes_total: z.number().int().describe('Caveats matching the full result, before the cap.'),
     nowcast: z
       .array(nowcastSchema)
       .optional()

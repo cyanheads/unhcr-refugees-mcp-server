@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for unhcr_list_reference over the fake UNHCR upstream:
  * every topic on both surfaces (`structuredContent` and `content[]`), strict
- * name matching, the name_contains notices, the enrichment contract on a
- * matched page and on an empty one, and upstream_busy.
+ * name matching, common English names ahead of it, the name_contains notices,
+ * the enrichment contract on a matched page and on an empty one, and
+ * upstream_busy.
  * @module tests/tools/list-reference.tool.test
  */
 
@@ -14,7 +15,7 @@ import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { listReferenceTool } from '@/mcp-server/tools/definitions/list-reference.tool.js';
 import { DATASETS } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { COUNTRY_ROWS } from '../fixtures/unhcr.js';
+import { COUNTRY_ROWS, envelope, type RawRow, USA_COUNTRY_ROW } from '../fixtures/unhcr.js';
 import type { FakeUnhcr } from '../helpers/fake-unhcr.js';
 import { errorOf, structuredOf, textOf } from '../helpers/results.js';
 import { initFakeUpstream } from '../helpers/services.js';
@@ -37,6 +38,95 @@ const run = (input: z.input<typeof listReferenceTool.input>) =>
 
 const isoOf = (result: { countries?: { iso3: string }[] | undefined }) =>
   result.countries?.map((country) => country.iso3);
+
+/** A `/countries/` row in the recorded key set, with the name variants UNHCR repeats filled in. */
+const countryRow = (
+  spec: Record<
+    'code' | 'iso' | 'iso2' | 'name' | 'nameFormal' | 'nameLong' | 'nationality',
+    string
+  >,
+): RawRow => ({ ...COUNTRY_ROWS[0], nameOrigin: spec.name, nameShort: spec.name, ...spec });
+
+/** Recorded rows the shared fixture leaves out: names that share words, and names with periods. */
+const EXTRA_COUNTRY_ROWS: RawRow[] = [
+  USA_COUNTRY_ROW,
+  countryRow({
+    code: 'COB',
+    iso: 'COG',
+    iso2: 'CG',
+    name: 'Congo',
+    nameLong: 'Congo',
+    nameFormal: 'the Republic of the Congo',
+    nationality: 'Congolese',
+  }),
+  countryRow({
+    code: 'COD',
+    iso: 'COD',
+    iso2: 'CD',
+    name: 'Dem. Rep. of the Congo',
+    nameLong: 'Democratic Republic of the Congo',
+    nameFormal: 'the Democratic Republic of the Congo',
+    nationality: 'of the Democratic Republic of the Congo',
+  }),
+  countryRow({
+    code: 'ICO',
+    iso: 'CIV',
+    iso2: 'CI',
+    name: "Cote d'Ivoire",
+    nameLong: "Cote d'Ivoire",
+    nameFormal: "the Republic of Cote d'Ivoire",
+    nationality: 'Ivorian',
+  }),
+  countryRow({
+    code: 'KOR',
+    iso: 'KOR',
+    iso2: 'KR',
+    name: 'Rep. of Korea',
+    nameLong: 'Republic of Korea',
+    nameFormal: 'the Republic of Korea',
+    nationality: 'of the Republic of Korea',
+  }),
+  countryRow({
+    code: 'KRN',
+    iso: 'PRK',
+    iso2: 'KP',
+    name: "Dem. People's Rep. of Korea",
+    nameLong: "Democratic People's Republic of Korea",
+    nameFormal: "the Democratic People's Republic of Korea",
+    nationality: "of the Democratic People's Republic of Korea",
+  }),
+  countryRow({
+    code: 'UAE',
+    iso: 'ARE',
+    iso2: 'AE',
+    name: 'United Arab Emirates',
+    nameLong: 'United Arab Emirates',
+    nameFormal: 'the United Arab Emirates',
+    nationality: 'of the United Arab Emirates',
+  }),
+];
+
+/** Serve `rows` as UNHCR's whole country table, leaving the per-bureau member lists alone. */
+const serveCountries = (rows: RawRow[]) =>
+  fake.intercept({
+    endpoint: 'countries',
+    matches: (params) => !params.has('unhcr_region'),
+    respond: () => Response.json(envelope(rows)),
+  });
+
+/** The ISO3 codes, total, and notice of one `name_contains` call through the production parse. */
+async function lookup(query: string) {
+  const result = await runToolContract(listReferenceTool, {
+    topic: 'countries',
+    name_contains: query,
+  });
+  const { countries, totalCount, notice } = structuredOf(result) as {
+    countries: { iso3: string }[];
+    notice?: string;
+    totalCount: number;
+  };
+  return { iso3: isoOf({ countries }), notice, text: textOf(result.content), totalCount };
+}
 
 describe('topic countries', () => {
   it('lists every queryable country, sorted by name, with its bureau and trimmed names', async () => {
@@ -136,6 +226,8 @@ describe('topic countries', () => {
     ['syrian arab', ['SYR']],
     ['arab rep', ['EGY', 'SYR']],
     ['palestinian', ['PSE']],
+    // A nationality, in none of the country's names.
+    ['turkish', ['TUR']],
   ])('matches name_contains %j strictly on name words or exact codes', async (query, expected) => {
     expect(isoOf(await run({ topic: 'countries', name_contains: query }))).toEqual(expected);
   });
@@ -234,6 +326,151 @@ describe('topic countries', () => {
   });
 });
 
+describe('common English country names', () => {
+  beforeEach(() => serveCountries([...COUNTRY_ROWS, ...EXTRA_COUNTRY_ROWS]));
+
+  it.each([
+    ['ukr', ['UKR']],
+    ['ukraine', ['UKR']],
+    ['unk', ['UNK']],
+    ['unknown', ['UNK']],
+    ['britain', ['GBR']],
+    ['congo', ['COG', 'COD']],
+    ['korea', ['PRK', 'KOR']],
+    ['Rep. of Korea', ['PRK', 'KOR']],
+    ['Dem. Rep. of the Congo', ['COD']],
+    ["Côte d'Ivoire", ['CIV']],
+    ['Syrian Arab Rep.', ['SYR']],
+    ['united', ['ARE', 'GBR', 'USA']],
+  ])('leaves %j to the token match, with no notice', async (query, expected) => {
+    const result = await lookup(query);
+    expect(result).toMatchObject({ iso3: expected, totalCount: expected.length });
+    expect(result.notice).toBeUndefined();
+    expect(result.text).not.toContain('\n> ');
+  });
+
+  it.each(['constructor', '__proto__', 'toString', 'turkeys', 'north turkey'])(
+    'matches nothing for %j, which is no common name and no UNHCR name',
+    async (query) => {
+      expect(await lookup(query)).toMatchObject({
+        iso3: [],
+        totalCount: 0,
+        notice: `No country name or code matched "${query}". Call unhcr_list_reference (topic countries) without name_contains to browse the full list.`,
+      });
+    },
+  );
+
+  it.each(['turkey', 'TURKEY', 'Turkey!', '  Turkey\n'])(
+    'returns only Türkiye for %j, with the notice on both surfaces',
+    async (query) => {
+      const notice = 'Read "turkey" as Türkiye (ISO3 TUR), UNHCR\'s name for the country.';
+      const result = await runToolContract(listReferenceTool, {
+        topic: 'countries',
+        name_contains: query,
+      });
+      expect(structuredOf(result)).toEqual({
+        topic: 'countries',
+        countries: [
+          {
+            iso3: 'TUR',
+            iso2: 'TR',
+            unhcr_code: 'TUR',
+            name: 'Türkiye',
+            name_long: 'Türkiye',
+            nationality: 'Turkish',
+            unhcr_region: 'Europe',
+            unsd_region: 'Western Asia',
+            major_area: 'Asia',
+          },
+        ],
+        totalCount: 1,
+        notice,
+      });
+      const lines = textOf(result.content).split('\n');
+      expect(lines).toContain(
+        '| TUR | TR | TUR | Türkiye | Türkiye | Turkish | Europe | Western Asia | Asia |',
+      );
+      expect(lines).toContain('**1 total**');
+      expect(lines).toContain(`> ${notice}`);
+    },
+  );
+
+  it.each([
+    ['uk', 'GBR', 'Read "uk" as United Kingdom of Great Britain and Northern Ireland (ISO3 GBR)'],
+    ['U.K.', 'GBR', 'Read "uk" as United Kingdom of Great Britain and Northern Ireland (ISO3 GBR)'],
+    ['S. Korea', 'KOR', 'Read "s korea" as Rep. of Korea (ISO3 KOR)'],
+    ['S.Korea', 'KOR', 'Read "s korea" as Rep. of Korea (ISO3 KOR)'],
+    ['D.R.Congo', 'COD', 'Read "dr congo" as Dem. Rep. of the Congo (ISO3 COD)'],
+    ['Korea, South', 'KOR', 'Read "korea south" as Rep. of Korea (ISO3 KOR)'],
+    ['D.P.R.K.', 'PRK', 'Read "dprk" as Dem. People\'s Rep. of Korea (ISO3 PRK)'],
+    ['Ivory  Coast', 'CIV', 'Read "ivory coast" as Cote d\'Ivoire (ISO3 CIV)'],
+    ['Congo (Kinshasa)', 'COD', 'Read "congo kinshasa" as Dem. Rep. of the Congo (ISO3 COD)'],
+  ])('returns only the country %j names, ahead of the token match', async (query, iso3, read) => {
+    const result = await lookup(query);
+    const notice = `${read}, UNHCR's name for the country.`;
+    expect(result).toMatchObject({ iso3: [iso3], totalCount: 1, notice });
+    expect(result.text.split('\n')).toContain(`> ${notice}`);
+  });
+
+  it.each([
+    ['U.S.A.', ['USA']],
+    ['U.A.E.', ['ARE']],
+    ['Dem.Rep.of the Congo', ['COD']],
+  ])('reads the periods of %j and leaves it to the token match', async (query, expected) => {
+    const result = await lookup(query);
+    expect(result).toMatchObject({ iso3: expected, totalCount: 1 });
+    expect(result.notice).toBeUndefined();
+  });
+
+  it.each([
+    ['D.P.R. of Korea', ['PRK']],
+    ['Korea (the D.P.R.)', ['PRK']],
+    ['D.R. of the Congo', ['COD']],
+    ['U.K. of Great Britain and Northern Ireland', ['GBR']],
+    ['U．A． Emirates', ['ARE']],
+  ])(
+    'reads the initials of %j letter by letter when they match nothing as one word',
+    async (query, expected) => {
+      const result = await lookup(query);
+      expect(result).toMatchObject({ iso3: expected, totalCount: 1 });
+      expect(result.notice).toBeUndefined();
+    },
+  );
+
+  it('quotes the common name, never the caller’s text, and flattens line breaks in UNHCR’s name', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream());
+    serveCountries(
+      COUNTRY_ROWS.map((row) => (row.iso === 'TUR' ? { ...row, name: 'Tür\nkiye !' } : row)),
+    );
+    const result = await lookup('[**TuRkEy**]\n<!--');
+    const notice = 'Read "turkey" as Tür kiye ! (ISO3 TUR), UNHCR\'s name for the country.';
+    expect(result).toMatchObject({ iso3: ['TUR'], notice });
+    expect(result.text.split('\n')).toContain(`> ${notice}`);
+  });
+
+  it('falls through to the token match when UNHCR’s list lacks the country', async () => {
+    disposeUnhcrService();
+    ({ fake } = initFakeUpstream());
+    serveCountries(COUNTRY_ROWS.filter((row) => row.iso !== 'TUR' && row.iso !== 'GBR'));
+    expect(await lookup('turkey')).toMatchObject({
+      iso3: [],
+      totalCount: 0,
+      notice:
+        'No country name or code matched "turkey". Call unhcr_list_reference (topic countries) without name_contains to browse the full list.',
+    });
+    const uk = await lookup('uk');
+    expect(uk).toMatchObject({ iso3: ['UKR', 'UNK'], totalCount: 2 });
+    expect(uk.notice).toBeUndefined();
+  });
+
+  it('names the resolved country only for the whole query, never for one of its words', async () => {
+    const result = await lookup('uk ukraine');
+    expect(result).toMatchObject({ iso3: ['UKR'], totalCount: 1 });
+    expect(result.notice).toBeUndefined();
+  });
+});
+
 describe('other topics', () => {
   it('lists the six regional bureaus with their country counts', async () => {
     const result = await runToolContract(listReferenceTool, { topic: 'regions' });
@@ -324,16 +561,18 @@ describe('other topics', () => {
     expect(text).toContain('| C | Cases | yes |');
   });
 
-  it('ignores name_contains outside topic countries, with a notice', async () => {
-    const result = await runToolContract(listReferenceTool, {
-      topic: 'population_types',
-      name_contains: 'syria',
-    });
-    expect(structuredOf(result).notice).toBe(
-      'name_contains applies only to topic countries and was ignored.',
-    );
-    expect(textOf(result.content)).toContain('> name_contains applies only to topic countries');
-  });
+  it.each(['syria', 'turkey'])(
+    'ignores name_contains %j outside topic countries, with a notice',
+    async (name_contains) => {
+      const result = await runToolContract(listReferenceTool, {
+        topic: 'population_types',
+        name_contains,
+      });
+      const notice = 'name_contains applies only to topic countries and was ignored.';
+      expect(structuredOf(result).notice).toBe(notice);
+      expect(textOf(result.content).split('\n')).toContain(`> ${notice}`);
+    },
+  );
 });
 
 describe('topic coverage, all eight datasets', () => {
@@ -367,9 +606,12 @@ describe('topic coverage, all eight datasets', () => {
       ['footnotes', 'unhcr_get_population', null, 2015, 2025],
     ]);
     const registered = new Set(
-      buildToolDefinitions({ clampLimits: true, dropEnabled: false, rowLimitCap: 10_000 }).map(
-        (t) => t.name,
-      ),
+      buildToolDefinitions({
+        clampLimits: true,
+        dropEnabled: false,
+        normalizeInputs: true,
+        rowLimitCap: 10_000,
+      }).map((t) => t.name),
     );
     for (const entry of coverage) expect(registered.has(entry.tool), entry.dataset).toBe(true);
 

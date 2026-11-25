@@ -2,14 +2,15 @@
  * @fileoverview Country input normalization for the `origin` / `asylum`
  * filters. Normalizes what is certain and rejects what is ambiguous: ISO3 in
  * any case is accepted, ISO 3166-1 alpha-2 is rewritten to ISO3 through
- * UNHCR's country table, and UNHCR's own codes and country names are refused
- * with the exact ISO3 to pass instead. UNHCR codes are never normalized because
- * three of them are valid ISO3 codes for other countries (AUS is Austria, ARE
- * is Egypt, MAR is Martinique in UNHCR's scheme).
+ * UNHCR's country table, and UNHCR's own codes and common country names are
+ * refused with the exact ISO3 to pass instead. UNHCR codes are never normalized
+ * because three of them are valid ISO3 codes for other countries (AUS is
+ * Austria, ARE is Egypt, MAR is Martinique in UNHCR's scheme).
  * @module services/unhcr/country-input
  */
 
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { COUNTRY_ALIASES, normalizeName } from './country-aliases.js';
 import type { Country } from './types.js';
 
 /**
@@ -93,7 +94,11 @@ export function parseCodeList(value: string | string[] | undefined, field: strin
   return codes;
 }
 
-/** Validate codes against UNHCR's country table, rewriting ISO2 to ISO3. */
+/**
+ * Validate codes against UNHCR's country table, rewriting ISO2 to ISO3. A
+ * refused code that is both a UNHCR code and a common name is explained as the
+ * UNHCR code: the live table outranks a static name for its own codes.
+ */
 export function resolveCountryCodes(
   codes: readonly string[],
   table: CountryTable,
@@ -109,13 +114,10 @@ export function resolveCountryCodes(
       iso3.push(code);
       continue;
     }
-    // UNHCR's table gives "Unknown" the alpha-2 code UK, which is not the United Kingdom's.
-    if (code === 'UK') {
-      unknown.push(code);
-      suggestions.push('UK is not an ISO country code; the United Kingdom is GBR.');
-      continue;
-    }
-    const byIso2 = table.byIso2.get(code);
+    const alias = normalizeName(code);
+    const aliasIso3 = COUNTRY_ALIASES.get(alias);
+    // A common name is never read as ISO2: UNHCR's table gives "Unknown" the alpha-2 code UK.
+    const byIso2 = aliasIso3 === undefined ? table.byIso2.get(code) : undefined;
     if (byIso2?.iso3) {
       iso3.push(byIso2.iso3);
       normalized.push({ input: code, iso3: byIso2.iso3 });
@@ -123,8 +125,13 @@ export function resolveCountryCodes(
     }
     unknown.push(code);
     const byUnhcr = table.byUnhcrCode.get(code);
+    const byAlias = aliasIso3 === undefined ? undefined : table.byIso3.get(aliasIso3);
     if (byUnhcr?.iso3) {
       suggestions.push(`${code} is UNHCR's code for ${byUnhcr.name}; pass ${byUnhcr.iso3}.`);
+    } else if (byAlias) {
+      suggestions.push(
+        `${alias.toUpperCase()} is not an ISO country code; ${byAlias.name} is ${byAlias.iso3}.`,
+      );
     } else {
       unresolved.push(code);
     }

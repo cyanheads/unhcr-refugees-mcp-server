@@ -10,6 +10,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { ASYLUM_CODES, DATASETS, POPULATION_TYPES } from '@/services/unhcr/codes.js';
+import { COUNTRY_ALIASES, normalizeName } from '@/services/unhcr/country-aliases.js';
 import { footnoteSpan } from '@/services/unhcr/footnote-match.js';
 import type { Country } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
@@ -18,20 +19,12 @@ import { cell, inline, table } from '../shared/markdown.js';
 
 const TOPICS = ['countries', 'regions', 'coverage', 'population_types', 'asylum_codes'] as const;
 
-/** Lowercase, strip diacritics and punctuation, for token matching. */
-const normalizeText = (text: string) =>
-  text
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/\p{M}/gu, '')
-    .replace(/[^a-z0-9\s]/g, ' ');
-
 /**
  * Strict token match: every query token is a substring of the joined name
  * variants or equals one of the country's codes. No fuzzy fallback.
  */
 function matchesQuery(country: Country, tokens: readonly string[]): boolean {
-  const names = normalizeText(
+  const names = normalizeName(
     [
       country.name,
       country.nameLong,
@@ -49,6 +42,20 @@ function matchesQuery(country: Country, tokens: readonly string[]): boolean {
     ),
   );
   return tokens.every((token) => names.includes(token) || codes.has(token));
+}
+
+/**
+ * The countries a query's words match. Initials read as one word first
+ * (`U.S.A.`); where that matches nothing, each is its own word, so
+ * `F.R. Germany` finds the country whose names hold F, R, and Germany.
+ */
+function matchCountries<T extends Country>(countries: readonly T[], query: string): T[] {
+  const match = (text: string) => {
+    const tokens = normalizeName(text).split(' ').filter(Boolean);
+    return countries.filter((country) => matchesQuery(country, tokens));
+  };
+  const joined = match(query);
+  return joined.length > 0 ? joined : match(query.normalize('NFKD').replaceAll('.', ' '));
 }
 
 const codeSchema = z
@@ -76,7 +83,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
         "countries: every queryable country with its codes, names, and regions. regions: UNHCR's regional bureaus. coverage: first and latest year of each dataset, plus the current nowcast month. population_types: what each population type counts and which output column carries it. asylum_codes: asylum authority, application stage, decision level, and unit codes.",
       ),
     name_contains: blankAsUnset(z.string().max(200).optional()).describe(
-      'For topic countries only: keep countries whose names, in UNHCR’s English spelling, contain every word given, ignoring case, accents, and punctuation, or whose ISO3, ISO2, or UNHCR code equals a word ("syria", "turkiye", "britain", "deu"). Words match every name variant UNHCR records, including short and formal names the output does not list. No fuzzy matching.',
+      'For topic countries only: keep countries whose names, in UNHCR’s English spelling, contain every word given, ignoring case, accents, and punctuation, or whose ISO3, ISO2, or UNHCR code equals a word ("syria", "turkiye", "britain", "deu"). Words match every name variant UNHCR records, including short and formal names the output does not list. Some common English names UNHCR does not use ("turkey", "ivory coast", "uk") return just their country when given alone, with a notice. No fuzzy matching.',
     ),
   }),
 
@@ -197,7 +204,9 @@ export const listReferenceTool = tool('unhcr_list_reference', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when name_contains matched nothing or does not apply to the topic.'),
+      .describe(
+        "Guidance when name_contains matched nothing or does not apply to the topic, or UNHCR's name and the ISO3 of the one country a common English name was read as.",
+      ),
     totalCount: z
       .number()
       .optional()
@@ -225,18 +234,24 @@ export const listReferenceTool = tool('unhcr_list_reference', {
 
     switch (input.topic) {
       case 'countries': {
-        const [{ list }, { regionByIso3 }] = await Promise.all([
+        const [{ list, table: countryTable }, { regionByIso3 }] = await Promise.all([
           service.countries(ctx),
           service.regions(ctx),
         ]);
-        const tokens = normalizeText(query).split(/\s+/).filter(Boolean);
+        const name = normalizeName(query);
+        const aliasIso3 = COUNTRY_ALIASES.get(name);
+        const aliased = aliasIso3 === undefined ? undefined : countryTable.byIso3.get(aliasIso3);
         // A query with no Latin letter or digit leaves no token, and matches nothing rather than everything.
-        const matchable = query === '' || tokens.length > 0;
-        const countries = list
-          .filter(
-            (country): country is Country & { iso3: string } =>
-              matchable && country.iso3 !== null && matchesQuery(country, tokens),
-          )
+        const matchable = query === '' || name !== '';
+        const queryable = list.filter(
+          (country): country is Country & { iso3: string } => country.iso3 !== null,
+        );
+        const matched = aliased
+          ? queryable.filter((country) => country === aliased)
+          : matchable
+            ? matchCountries(queryable, query)
+            : [];
+        const countries = matched
           .sort((a, b) => a.name.localeCompare(b.name))
           .map((country) => ({
             iso3: country.iso3,
@@ -250,7 +265,11 @@ export const listReferenceTool = tool('unhcr_list_reference', {
             major_area: country.majorArea,
           }));
         ctx.enrich.total(countries.length);
-        if (countries.length === 0) {
+        if (aliased) {
+          ctx.enrich.notice(
+            `Read "${name}" as ${inline(aliased.name)} (ISO3 ${aliased.iso3}), UNHCR's name for the country.`,
+          );
+        } else if (countries.length === 0) {
           const why = matchable
             ? ''
             : " Names match UNHCR's English spellings and codes match ISO3, ISO2, or UNHCR codes, so name_contains needs Latin letters or digits.";

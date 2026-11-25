@@ -2,8 +2,8 @@
 
 **Server:** unhcr-refugees-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -76,8 +76,7 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       returned_refugees: countField('Refugees who returned to their origin country during the year, …'),
       // resettlement, naturalisation, returned_idps
     }).describe('…')).describe('Inline rows, sorted, up to limit.'),
-    ...sharedResultFields, // total_rows, complete, measure, applied_scope, latest_year, dataset?, data_notes, attribution
-    // footnotes, footnotes_total
+    ...sharedResultFields, // total_rows, complete, measure, applied_scope, latest_year, dataset?, data_notes, attribution, footnotes, footnotes_total
   }),
 
   enrichment: dataEnrichment,
@@ -168,6 +167,7 @@ const ServerConfigSchema = z.object({
   datasetTtlSeconds: z.coerce.number().int().min(60).default(86_400).describe('…'),
   dataframeDropEnabled: z.stringbool().default(false).describe('…'),
   clampLimits: z.stringbool().default(true).describe('…'),
+  normalizeInputs: z.stringbool().default(true).describe('…'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -181,12 +181,13 @@ export function getServerConfig(): ServerConfig {
     datasetTtlSeconds: 'UNHCR_DATASET_TTL_SECONDS',
     dataframeDropEnabled: 'UNHCR_DATAFRAME_DROP_ENABLED',
     clampLimits: 'UNHCR_CLAMP_LIMITS',
+    normalizeInputs: 'UNHCR_NORMALIZE_INPUTS',
   });
   return _config;
 }
 ```
 
-Every variable is optional: the upstream is keyless. `src/index.ts` loads `.env`, sets `process.env.CANVAS_PROVIDER_TYPE` to its `normalizeEnv` value or `duckdb` (a blank or an unsubstituted `${…}` placeholder reads as unset, as the framework parser reads it), and calls `resetConfig()`, all before `createApp()`, so dataframes are on unless an operator sets `none`. Tool modules evaluate before `.env` loads, so anything a schema depends on per deployment (`UNHCR_CLAMP_LIMITS`, the framework's `canvas.defaultRowLimit`) reaches the tools through `buildToolDefinitions()`, never a module-scope read; the module constants stay the default-mode definitions `lint:mcp` reads. A new variable goes into `.env.example`, `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table.
+Every variable is optional: the upstream is keyless. `src/index.ts` loads `.env`, sets `process.env.CANVAS_PROVIDER_TYPE` to its `normalizeEnv` value or `duckdb` (a blank or an unsubstituted `${…}` placeholder reads as unset, as the framework parser reads it), and calls `resetConfig()`, all before `createApp()`, so dataframes are on unless an operator sets `none`. Tool modules evaluate before `.env` loads, so anything a schema depends on per deployment (`UNHCR_CLAMP_LIMITS`, `UNHCR_NORMALIZE_INPUTS`, the framework's `canvas.defaultRowLimit`) reaches the tools through `buildToolDefinitions()`, never a module-scope read; the module constants stay the default-mode definitions `lint:mcp` reads. A new variable goes into `.env.example`, `server.json`, `manifest.json` (`mcp_config.env` + `user_config`), `.claude-plugin/plugin.json` (`userConfig` + `env`), `.codex-plugin/mcp.json` (`env_vars`), and the README configuration table.
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`UNHCR_MAX_ROWS`) not the path (`maxRows`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
@@ -205,6 +206,7 @@ await createApp({
   tools: buildToolDefinitions({
     clampLimits: config.clampLimits,
     dropEnabled: config.dataframeDropEnabled,
+    normalizeInputs: config.normalizeInputs,
     rowLimitCap: frameworkConfig.canvas.defaultRowLimit,
   }),
   resources: [],
@@ -240,7 +242,7 @@ await createApp({
 
 `teardown()` disposes the UNHCR request pacer. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
 
-`buildToolDefinitions()` registers `unhcr_dataframe_drop` live only when `UNHCR_DATAFRAME_DROP_ENABLED=true`; otherwise it wraps the tool with `disabledTool()`, which keeps it out of `tools/list` while the HTTP landing page still shows it with the setting that turns it on. It also rebuilds the five data tools with `limitInput(clampLimits)` and builds the query tool with `defineDataframeQueryTool({ clamp, rowLimitCap })`. Every count input goes through `shared/counts.ts`: `countSchema()` advertises no `maximum` in clamp mode, and `clampCount()` serves an over-cap value at the cap with a notice, an info log line, and one `unhcr.count_input.clamped` increment.
+`buildToolDefinitions()` registers `unhcr_dataframe_drop` live only when `UNHCR_DATAFRAME_DROP_ENABLED=true`; otherwise it wraps the tool with `disabledTool()`, which keeps it out of `tools/list` while the HTTP landing page still shows it with the setting that turns it on. It also rebuilds the five data tools through `withInputs()`, which swaps in the deployment's schema for each named input: `limitInput(clampLimits)` for `limit`, and for the list inputs of demographics and the two asylum tools (`demographicLists`, `applicationLists`, `decisionLists`) the `normalizeInputs` mode. It builds the query tool with `defineDataframeQueryTool({ clamp, rowLimitCap })`. Every count input goes through `shared/counts.ts`: `countSchema()` advertises no `maximum` in clamp mode, and `clampCount()` serves an over-cap value at the cap with a notice, an info log line, and one `unhcr.count_input.clamped` increment. Every list input (`stages`, `decision_levels`, `population_types`, `split_by`) goes through `codeList()` or `splitByList()` in `shared/inputs.ts`: with `normalizeInputs` a string reads as the array of the codes in it (a string opening with `[` is left to the framework, a string with no code is unset for a filter and rejected for `split_by`) and `split_by` folds case; without it the schema takes only an array. `finishRows()` logs each normalized list once at info and adds one to `unhcr.list_input.normalized`; `tools/list` is the same in both modes.
 
 ---
 
@@ -251,7 +253,7 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts JSON-serializable values; reads return their JSON form. Here it holds the tenant canvas id (`canvas-id`) and dataframe provenance and expiry (`df-meta/<name>`); only `services/canvas-bridge` accesses them. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts JSON-serializable values; reads return their JSON form. Here it holds the tenant canvas id (`canvas-id`, resolved through `DataCanvas.acquireShared`) and dataframe provenance and expiry (`df-meta/<name>`, each record naming the `canvasId` it sits on); only `services/canvas-bridge` accesses them. |
 | `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
 | `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
 | `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
@@ -311,7 +313,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point; loads .env, defaults CANVAS_PROVIDER_TYPE to duckdb, passes count settings
+  index.ts                              # createApp() entry point; loads .env, defaults CANVAS_PROVIDER_TYPE to duckdb, passes count and list-input settings
   config/
     server-config.ts                    # UNHCR_* env vars (Zod schema, lazy-parsed)
   services/
@@ -319,17 +321,18 @@ src/
       unhcr-api-service.ts              # API client (init/accessor): request builder, paced fetch, page walk, reference data
       response-cache.ts                 # LRU cache of response bodies (TTL + size budget)
       normalize.ts                      # Row values and identities; "-" becomes null, never zero
-      country-input.ts                  # origin/asylum parsing: ISO3 accepted, ISO2 rewritten, UNHCR codes refused
+      country-aliases.ts                # COUNTRY_ALIASES: common English names to ISO3; normalizeName, shared by name_contains and country-input
+      country-input.ts                  # origin/asylum parsing: ISO3 accepted, ISO2 rewritten, UNHCR codes and common names refused with the ISO3
       codes.ts                          # Static vocabulary: population types, asylum codes, datasets, attribution
       asylum-aggregate.ts               # Group-and-sum for the asylum tools; decision rates from summed counts
       footnote-match.ts                 # Footnote parsing and row matching
       types.ts                          # Raw and normalized row types
     canvas-bridge/
-      canvas-bridge.ts                  # DataCanvas adapter: one canvas per tenant, df_<id> names, metadata in ctx.state
+      canvas-bridge.ts                  # DataCanvas adapter: one shared canvas per tenant (acquireShared), df_<id> names, metadata in ctx.state
   mcp-server/
     tools/
       definitions/
-        index.ts                        # buildToolDefinitions(): count-input schemas per deployment; drop via disabledTool() unless enabled
+        index.ts                        # buildToolDefinitions(): count- and list-input schemas per deployment; drop via disabledTool() unless enabled
         get-population.tool.ts          # unhcr_get_population
         get-demographics.tool.ts        # unhcr_get_demographics
         get-asylum-applications.tool.ts # unhcr_get_asylum_applications
@@ -340,11 +343,11 @@ src/
         dataframe-query.tool.ts         # unhcr_dataframe_query
         dataframe-drop.tool.ts          # unhcr_dataframe_drop (opt-in)
       shared/
-        inputs.ts                       # scopeInputs, resultInputs, limitInput, LIMIT_CAP, blankAsUnset
+        inputs.ts                       # scopeInputs, resultInputs, limitInput, LIMIT_CAP, blankAsUnset, codeList, splitByList (a string reads as its codes)
         counts.ts                       # countSchema() + clampCount(): one cap per count input, notice, log line, counter
         outputs.ts                      # Shared output fields + markdown renderers (renderResultHeader, …)
         scope.ts                        # resolveScope(): country codes, expand, year window
-        results.ts                      # finishRows(): sort, clamp and cut to limit, stage overflow, enrichment notice
+        results.ts                      # finishRows(): sort, count normalized lists, clamp and cut to limit, stage overflow, enrichment notice
         query-output.ts                 # formatQueryOutput(): unhcr_dataframe_query content[], Markdown table or fenced JSON
         markdown.ts                     # cell / inline / blockquote for upstream text
 ```
@@ -460,13 +463,13 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
 **README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
 
-**Dependency hold:** `@duckdb/node-api` stays on `^1.5.6-r.2`. Under DuckDB 2 the framework's canvas SQL gate refuses `SHOW <table>`, which 1.5.x answers ([cyanheads/mcp-ts-core#800](https://github.com/cyanheads/mcp-ts-core/issues/800)); move to `^2.0.0-r.1` once that ships. No `outdated.allowlist` entry is needed while `bun outdated`'s Update column equals Current.
+**Dependency hold:** `@duckdb/node-api` stays on `^1.5.6-r.2`. Under DuckDB 2 each live canvas holds about four async threads per core, which the provider's thread cap does not reach, so a process holding many canvases can hit the OS thread limit ([cyanheads/mcp-ts-core#870](https://github.com/cyanheads/mcp-ts-core/issues/870)); move to the 2.x line once a framework release bounds that pool. No `outdated.allowlist` entry is needed while `bun outdated`'s Update column equals Current.
 
 ---
 

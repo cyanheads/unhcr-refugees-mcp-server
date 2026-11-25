@@ -25,7 +25,7 @@ import {
 import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { TERMS_URL } from '@/services/unhcr/codes.js';
 import { disposeUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { carryDataframeState, flowContext, stagePopulation } from '../helpers/dataframes.js';
+import { flowContext, seededFrom, stagePopulation } from '../helpers/dataframes.js';
 import { errorOf, structuredOf, textOf, unescapeMarkdown } from '../helpers/results.js';
 import { createTestCanvas, initFakeUpstream, shutdownCanvas } from '../helpers/services.js';
 
@@ -52,15 +52,6 @@ afterEach(() => {
 
 const queryIn = (ctx: ReturnType<typeof flowContext>, input: Input) =>
   dataframeQueryTool.handler(dataframeQueryTool.input.parse(input), ctx);
-
-/** The query tool running against the dataframes an earlier call staged. */
-const querySeededFrom = (source: ReturnType<typeof flowContext>): typeof dataframeQueryTool => ({
-  ...dataframeQueryTool,
-  handler: async (input, ctx) => {
-    await carryDataframeState(source, ctx);
-    return dataframeQueryTool.handler(input, ctx);
-  },
-});
 
 const recoveryFor = (reason: string) =>
   dataframeQueryTool.errors?.find((entry) => entry.reason === reason)?.recovery;
@@ -406,7 +397,7 @@ describe('count inputs', () => {
         expand: 'asylum',
         year_from: 2025,
       });
-      const result = await runToolContract(querySeededFrom(flow), {
+      const result = await runToolContract(seededFrom(dataframeQueryTool, flow), {
         sql: `SELECT year FROM ${name} CROSS JOIN (SELECT unnest(generate_series(1, 3)) AS k)`,
         row_limit: 1,
         preview: 10_001,
@@ -463,7 +454,7 @@ describe('staged dataframes', () => {
         register_as: 'df_CHILD_00001',
       });
       expect(first).toMatchObject({ complete: false, incomplete_sources: [name] });
-      const child = await runToolContract(querySeededFrom(flow), {
+      const child = await runToolContract(seededFrom(dataframeQueryTool, flow), {
         sql: 'SELECT * FROM df_CHILD_00001 WHERE false',
         preview: 0,
       });
@@ -479,7 +470,7 @@ describe('staged dataframes', () => {
   it('queries a staged result and credits the companion series it carries', async () => {
     const flow = flowContext();
     const name = await stagePopulation(flow, { asylum: 'JOR' });
-    const result = await runToolContract(querySeededFrom(flow), {
+    const result = await runToolContract(seededFrom(dataframeQueryTool, flow), {
       sql: `SELECT year, refugees, unrwa_refugees, asylum_unhcr_region FROM ${name} ORDER BY year`,
     });
     const structured = structuredOf(result);
@@ -557,7 +548,7 @@ describe('staged dataframes', () => {
     const flow = flowContext();
     const name = await stagePopulation(flow, { origin: 'SYR', asylum: 'DEU' });
     initCanvasBridge(canvas, { ttlMs: 60_000, rowBudget: 3 });
-    const result = await runToolContract(querySeededFrom(flow), {
+    const result = await runToolContract(seededFrom(dataframeQueryTool, flow), {
       sql: `SELECT year, refugees FROM ${name}`,
       register_as: 'df_EVICT_00001',
     });
@@ -695,7 +686,11 @@ describe('declared errors, by reason', () => {
     ['non_select_statement', 'CREATE TABLE t AS SELECT 1', JsonRpcErrorCode.ValidationError],
     ['multi_statement', 'SELECT 1; SELECT 2', JsonRpcErrorCode.ValidationError],
     ['denied_function', "SELECT * FROM read_csv('/etc/passwd')", JsonRpcErrorCode.ValidationError],
-    ['plan_operator_not_allowed', 'SELECT * FROM range(3)', JsonRpcErrorCode.ValidationError],
+    [
+      'plan_operator_not_allowed',
+      'SELECT * FROM (VALUES (1), (2)) t(n), range(t.n)',
+      JsonRpcErrorCode.ValidationError,
+    ],
     ['system_catalog_access', 'SELECT * FROM duckdb_tables()', JsonRpcErrorCode.ValidationError],
   ])('fails %s with the tool’s recovery on both surfaces', async (reason, sql, code) => {
     const result = await runToolContract(dataframeQueryTool, { sql });
@@ -705,6 +700,96 @@ describe('declared errors, by reason', () => {
     const text = unescapeMarkdown(textOf(result.content));
     expect(text).toContain(`reason ${reason}`);
     expect(text).toContain(`Recovery: ${recoveryFor(reason)}`);
+  });
+
+  it('answers range() and generate_series() with constant arguments, and a per-row unnest(range())', async () => {
+    const flow = flowContext();
+    const name = await stagePopulation(flow, { origin: 'SYR', asylum: 'DEU' });
+    const spine = await queryIn(flow, {
+      sql: `SELECT y AS year, refugees IS NULL AS missing FROM range(2024, 2027) s(y) LEFT JOIN ${name} ON year = y ORDER BY 1`,
+    });
+    expect(spine.rows).toEqual([
+      { year: '2024', missing: false },
+      { year: '2025', missing: false },
+      { year: '2026', missing: true },
+    ]);
+    const series = await queryIn(flow, {
+      sql: 'SELECT generate_series AS n FROM generate_series(1, 2)',
+    });
+    expect(series.rows).toEqual([{ n: '1' }, { n: '2' }]);
+    const perRow = await queryIn(flow, {
+      sql: 'SELECT n, unnest(range(n)) AS i FROM (VALUES (1), (2)) t(n) ORDER BY 1, 2',
+    });
+    expect(perRow.rows).toEqual([
+      { n: 1, i: '0' },
+      { n: 2, i: '0' },
+      { n: 2, i: '1' },
+    ]);
+  });
+
+  it.each([
+    [
+      'a SELECT whose keyword alias lacks AS',
+      'SELECT 1 rows',
+      'invalid_sql',
+      'put AS before an alias that is an SQL keyword',
+    ],
+    [
+      'a zero step in range()',
+      'SELECT * FROM range(1, 10, 0)',
+      'sql_execution_error',
+      'correct a rejected function argument',
+    ],
+    [
+      'arithmetic past its type',
+      'SELECT n * 2000000000 AS x FROM (VALUES (1), (2000000000)) t(n)',
+      'sql_execution_error',
+      'cast to a wider type',
+    ],
+    [
+      'a PIVOT that lists no values',
+      'PIVOT (SELECT 1 AS k, 2 AS v) ON k USING sum(v)',
+      'non_select_statement',
+      'give a PIVOT its values, as ON column IN (value, …)',
+    ],
+    [
+      'a function over a column',
+      'SELECT * FROM (VALUES (1), (2)) t(n), range(t.n)',
+      'plan_operator_not_allowed',
+      'unnest(range(column))',
+    ],
+    [
+      'an alias spelled like a metadata view',
+      'SELECT 1 AS pg_class',
+      'system_catalog_access',
+      'rename any alias, CTE, or other name spelled like a catalog or metadata view',
+    ],
+    [
+      'a table name that is a file',
+      "SELECT * FROM 'x.csv'",
+      'non_select_statement',
+      'Send one read-only SELECT against the df_<id> tables your unhcr_get_* results or register_as calls created, and give a PIVOT its values, as ON column IN (value, …).',
+    ],
+    [
+      'a table name that is not a dataframe handle',
+      'SELECT * FROM nope',
+      'missing_table',
+      'Check the name against the dataset.name or register_as that created it; if it expired or was evicted, re-run the unhcr_get_* call that produced it.',
+    ],
+  ])('names the fix for %s', async (_label, sql, reason, fix) => {
+    const result = await runToolContract(dataframeQueryTool, { sql });
+    expect(errorOf(result).data).toMatchObject({
+      reason,
+      recovery: { hint: expect.stringContaining(fix) },
+    });
+    expect(unescapeMarkdown(textOf(result.content))).toContain(fix);
+  });
+
+  it('answers a PIVOT that lists its values', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'PIVOT (SELECT 1 AS k, 2 AS v) ON k IN (1) USING sum(v)',
+    });
+    expect(structuredOf(result).rows).toEqual([{ 1: '2' }]);
   });
 
   it('fails register_as_clash when the name is already staged', async () => {

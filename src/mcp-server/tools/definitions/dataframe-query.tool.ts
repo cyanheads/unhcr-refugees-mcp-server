@@ -165,18 +165,18 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
         code: JsonRpcErrorCode.ValidationError,
         severity: 'notice',
         thrownBy: 'service',
-        when: 'A statement starting with SELECT, WITH, or FROM does not parse, or the SELECT fails to prepare: an unknown column, table, or function, or an invalid expression',
+        when: 'A statement opening with a read keyword (SELECT, WITH, FROM, VALUES, …) does not parse, or the SELECT fails to prepare: an unknown column, table, or function, or an invalid expression',
         recovery:
-          'Check SQL syntax, column names, and table names against unhcr_dataframe_describe.',
+          'Check SQL syntax, column names, and table names against unhcr_dataframe_describe, and put AS before an alias that is an SQL keyword.',
       },
       {
         reason: 'sql_execution_error',
         code: JsonRpcErrorCode.ValidationError,
         severity: 'notice',
         thrownBy: 'service',
-        when: 'The SELECT prepared but failed on the data it read: a cast or conversion that does not fit, an out-of-range value, or invalid input to a function',
+        when: 'The SELECT prepared but failed as it ran: a cast or conversion that does not fit, an out-of-range value, or an argument a function rejects, such as a zero step in range()',
         recovery:
-          'Wrap the failing cast in TRY_CAST, or filter out the rows the error message names before converting them.',
+          'Fix what the error message names: wrap a failing cast in TRY_CAST, cast to a wider type before arithmetic that overflows, correct a rejected function argument, or filter out the rows.',
       },
       {
         reason: 'register_as_clash',
@@ -200,9 +200,9 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
         code: JsonRpcErrorCode.ValidationError,
         severity: 'notice',
         thrownBy: 'service',
-        when: 'The statement is not a read-only SELECT: an INSERT, UPDATE, DDL, PRAGMA, or other write the engine refuses, or SQL that fails to parse and does not start with SELECT, WITH, or FROM (such as a misspelled SELEC)',
+        when: 'The statement is not a read-only SELECT: an INSERT, UPDATE, DDL, PRAGMA, or other write, a PIVOT that does not list its values, a table name that is a file, or SQL that fails to parse and opens with no read keyword (such as a misspelled SELEC)',
         recovery:
-          'Send one read-only SELECT against the df_<id> tables your unhcr_get_* results or register_as calls created.',
+          'Send one read-only SELECT against the df_<id> tables your unhcr_get_* results or register_as calls created, and give a PIVOT its values, as ON column IN (value, …).',
       },
       {
         reason: 'multi_statement',
@@ -227,18 +227,18 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
         code: JsonRpcErrorCode.ValidationError,
         severity: 'notice',
         thrownBy: 'service',
-        when: 'The query plan uses an operator outside the read-only allowlist, such as the range() or generate_series() table functions',
+        when: 'The query plan uses an operator outside the read-only allowlist, such as a range() or generate_series() table function over a column or subquery',
         recovery:
-          'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, and unnest() are supported.',
+          'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, and unnest() are supported. The range() and generate_series() table functions take constant arguments; use unnest(range(column)) per row.',
       },
       {
         reason: 'system_catalog_access',
         code: JsonRpcErrorCode.ValidationError,
         severity: 'notice',
         thrownBy: 'service',
-        when: 'The SQL references a system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*)',
+        when: 'The SQL names a system catalog or internal metadata view (information_schema, pg_catalog, sqlite_master, duckdb_tables, pg_class, …), an alias, CTE, or any other name spelled like one included',
         recovery:
-          'Query only the df_<id> tables your unhcr_get_* results or register_as calls created, by name.',
+          'Query only the df_<id> tables your unhcr_get_* results or register_as calls created, by name, and rename any alias, CTE, or other name spelled like a catalog or metadata view.',
       },
     ],
 

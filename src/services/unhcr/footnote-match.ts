@@ -125,6 +125,17 @@ export function typesWithCounts(row: object): string[] {
   );
 }
 
+const ASYLUM_ROW_TYPES: readonly string[] = ['ASY'];
+
+/**
+ * The footnote types an asylum application or decision row carries: ASY,
+ * whatever its counts. Such a row has one subject, as a demographics row has
+ * its own type, and a zero or null count can be what a caveat explains.
+ */
+export function asylumRowTypes(): readonly string[] {
+  return ASYLUM_ROW_TYPES;
+}
+
 const coverageKey = (origin: string | null, asylum: string | null): string =>
   `${origin ?? ''}|${asylum ?? ''}`;
 

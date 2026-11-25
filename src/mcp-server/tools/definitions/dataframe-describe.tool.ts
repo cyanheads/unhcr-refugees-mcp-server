@@ -71,7 +71,7 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
                     name: z.string().describe('Column name.'),
                     type: z
                       .string()
-                      .describe('Column type (INTEGER, DOUBLE, VARCHAR, BOOLEAN, …).'),
+                      .describe('DuckDB column type (INTEGER, HUGEINT, DOUBLE, VARCHAR, …).'),
                     nullable: z.boolean().describe('Whether the column may hold NULL.'),
                   })
                   .describe('One column.'),
@@ -142,11 +142,11 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         expires_at: meta.expiresAt,
         row_count: meta.rowCount,
         complete: meta.complete,
-        incomplete_sources: meta.incompleteSources ?? (meta.complete ? [] : [meta.tableName]),
+        incomplete_sources: meta.incompleteSources,
         providers: meta.providers,
         column_schema: meta.columnSchema.map((column) => ({
           name: column.name,
-          type: column.type,
+          type: column.engineType ?? column.type,
           nullable: column.nullable ?? true,
         })),
       })),

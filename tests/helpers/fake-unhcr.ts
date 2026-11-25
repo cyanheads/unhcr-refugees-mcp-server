@@ -15,6 +15,7 @@
  * @module tests/helpers/fake-unhcr
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, type FetchMockHarness } from '@cyanheads/mcp-ts-core/testing';
 import {
   ASYLUM_APPLICATION_ROWS,
@@ -261,3 +262,94 @@ export const hangUntilAborted = (request: Request): Promise<Response> =>
   new Promise<Response>((_, reject) => {
     request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
   });
+
+/** One way UNHCR fails to serve `/footnotes/`, with the error a data tool fails with and the requests made before it does. */
+export interface FootnoteFault {
+  code: JsonRpcErrorCode;
+  /** The whole `error.data` the caller gets. */
+  data: Record<string, unknown>;
+  fault: string;
+  message: string;
+  requests: number;
+  respond: FakeIntercept['respond'];
+}
+
+/** The footnote faults every data tool fails the call on, though its data page arrived. */
+export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
+  {
+    fault: 'a 429 asking for a wait past the deadline',
+    respond: () => new Response('', { status: 429, headers: { 'retry-after': '90' } }),
+    requests: 1,
+    code: JsonRpcErrorCode.RateLimited,
+    message: 'UNHCR is rate-limiting requests from this server. Retry in 90 s.',
+    data: {
+      reason: 'upstream_busy',
+      retryable: true,
+      retryAfter: 90,
+      recovery: {
+        hint: 'Wait the retryAfter seconds the error carries, then retry; a narrower year window or no expand needs fewer upstream requests.',
+      },
+    },
+  },
+  {
+    fault: 'a 503 on every attempt',
+    respond: () => new Response('<html>Service Unavailable</html>', { status: 503 }),
+    requests: 3,
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    message: 'UNHCR returned HTTP 503',
+    data: { status: 503, statusCode: 503, retryAttempts: 3, operation: 'UNHCR API request' },
+  },
+  {
+    fault: 'an HTML 200 on every attempt',
+    respond: htmlOk,
+    requests: 3,
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    message: 'UNHCR API returned a response that is not JSON.',
+    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+  },
+  {
+    fault: 'JSON without an items array on every attempt',
+    respond: () => Response.json({ page: 1, maxPages: 1 }),
+    requests: 3,
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    message: 'UNHCR API returned JSON without an items array.',
+    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+  },
+  {
+    fault: 'an empty list on every attempt',
+    respond: () => Response.json({ page: 1, maxPages: 0, items: [] }),
+    requests: 3,
+    code: JsonRpcErrorCode.ServiceUnavailable,
+    message: 'UNHCR API returned an empty reference list.',
+    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+  },
+  {
+    fault: 'a 404',
+    respond: htmlNotFound,
+    requests: 1,
+    code: JsonRpcErrorCode.NotFound,
+    message: 'UNHCR returned HTTP 404',
+    data: { status: 404, statusCode: 404 },
+  },
+  {
+    fault: 'a 403',
+    respond: () => new Response('', { status: 403 }),
+    requests: 1,
+    code: JsonRpcErrorCode.Forbidden,
+    message: 'UNHCR returned HTTP 403',
+    data: { status: 403, statusCode: 403 },
+  },
+  {
+    fault: 'no answer before the call’s deadline',
+    respond: hangUntilAborted,
+    requests: 1,
+    code: JsonRpcErrorCode.Timeout,
+    message: "UNHCR did not answer within this call's 45 s budget.",
+    data: {
+      retryable: true,
+      recovery: {
+        hint: 'Pages fetched before the deadline are cached, so retrying the identical call promptly resumes from them and fetches only the rest. If the retry also times out, narrow the year window or drop expand so the call needs fewer upstream requests.',
+      },
+    },
+  },
+];
