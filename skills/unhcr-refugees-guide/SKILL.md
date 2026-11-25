@@ -15,7 +15,7 @@ metadata:
 
 | Identifier | Where it comes from |
 |:--|:--|
-| Country (ISO3) | `unhcr_list_reference` topic `countries` with `name_contains`; `stateless` finds `XXA`, the non-country origin code. It matches UNHCR's spellings, plus some common English names UNHCR does not use (`turkey`, `ivory coast`, `south korea`, `uk`, `burma`), which return their one country with a notice naming UNHCR's name and the ISO3. Pass the ISO3 to `origin` and `asylum`: a name there fails, and its hint gives the ISO3 when the name is one of those |
+| Country (ISO3) | `unhcr_list_reference` topic `countries` with `name_contains`; `stateless` finds `XXA`, the non-country origin code. It matches UNHCR's spellings, plus some common English names UNHCR does not use (`turkey`, `ivory coast`, `south korea`, `uk`, `burma`), which return their one country with a notice naming UNHCR's name and the ISO3. Pass the ISO3 to `origin` and `asylum`: a name there fails, and its hint gives the ISO3 only for one of those sent as a single word (`turkey`) or as a list entry (`["ivory coast"]`), since a string splits on spaces |
 | UNHCR regional bureau | `unhcr_list_reference` topic `regions`. Staged tables carry the same names in `origin_unhcr_region` and `asylum_unhcr_region`, and UN subregions (`Western Europe`, `Western Asia`, …) in `origin_unsd_region` and `asylum_unsd_region`. No column marks the EU or any other bloc |
 | `df_XXXXX_XXXXX` | `dataset.name` on a data result that overflowed `limit` or set `stage`, `nowcast_dataset.name` for the nowcast, or your own `register_as` |
 
