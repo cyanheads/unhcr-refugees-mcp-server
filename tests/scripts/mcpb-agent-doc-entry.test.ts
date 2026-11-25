@@ -1,7 +1,7 @@
 /**
  * @fileoverview The bundle cleaner and the packaging linter select the same
  * dependency agent docs: `framework-skills/`, `skills/`, `.claude/`, and
- * `.agents/` trees at an installed package's root, and every `SKILL.md`. A
+ * `.agents/` trees, `AGENTS.md`, and `CLAUDE.md` at an installed package's root, and every `SKILL.md`. A
  * `skills/` directory deeper in a package is runtime code the bundle must keep
  * — the MCP SDK loads its `dist/ext/skills/` modules at startup.
  * @module tests/scripts/mcpb-agent-doc-entry.test
@@ -20,6 +20,7 @@ const keptEntries = [
   'node_modules/outer/node_modules/@modelcontextprotocol/server/dist/ext/skills/index.mjs',
   'node_modules/example/dist/skills/runtime.js',
   'node_modules/@scope/skills/index.js',
+  'node_modules/example/docs/AGENTS.md',
   'skills/unhcr-guide/SKILL.md',
   'dist/index.js',
 ];
@@ -34,6 +35,8 @@ const agentDocEntries = [
   'node_modules/outer/node_modules/@scope/example/skills/guide/guide.md',
   'node_modules/example/SKILL.md',
   'node_modules/example/docs/SKILL.md',
+  'node_modules/example/AGENTS.md',
+  'node_modules/@scope/example/CLAUDE.md',
 ];
 
 describe('dependency agent-doc entries in a bundle', () => {
@@ -48,7 +51,7 @@ describe('dependency agent-doc entries in a bundle', () => {
   it('fails a bundle that still holds agent docs, counting only those', () => {
     const errors = checkBundleEntries([...keptEntries, ...agentDocEntries], 'dist/x.mcpb');
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain('dist/x.mcpb contains 9 node_modules agent-doc entries');
+    expect(errors[0]).toContain('dist/x.mcpb contains 11 node_modules agent-doc entries');
   });
 
   it('uses one selector in the cleaner and the linter', () => {
