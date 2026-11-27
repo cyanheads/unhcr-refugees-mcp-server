@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-11-27 · ⚠️ Breaking
+
+UNHCR results identify their reporting periods and keep those dates through staged queries. Shared reads recover from transient outages within each caller’s budget.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-25 · ⚠️ Breaking
 
 Asylum tools carry UNHCR footnotes, list inputs accept strings, name_contains resolves common English country names, and concurrent first stagings share one canvas. unhcr_dataframe_query now refuses 35 metadata-view names used as identifiers (breaking).
