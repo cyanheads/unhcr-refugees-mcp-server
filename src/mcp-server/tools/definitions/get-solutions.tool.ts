@@ -29,7 +29,7 @@ import { resolveScope } from '../shared/scope.js';
 
 function dataNotes(counts: { unexpectedValues: number; yearlessRows: number }): string[] {
   return [
-    'Counts are flows: events during each calendar year, not people present at year end.',
+    'Counts are flows: events during the reporting period. Check footnotes for country-specific dates.',
     'The asylum country means something different per column: for returned_refugees it is the country refugees returned from, for resettlement the country they were resettled to, and for naturalisation the country that naturalised them. returned_idps sits on the origin country itself.',
     'Naturalisation is an incomplete proxy for local integration.',
     'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
@@ -153,6 +153,7 @@ export const getSolutionsTool = tool('unhcr_get_solutions', {
       service.footnotes(ctx),
     ]);
     const finished = await finishRows(ctx, {
+      dataset: 'solutions',
       sourceTool: 'unhcr_get_solutions',
       datasetLabel: 'solutions',
       queryParams: { ...input },

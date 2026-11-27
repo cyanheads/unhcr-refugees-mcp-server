@@ -65,7 +65,7 @@
         },
         {
           "name": "UNHCR_NORMALIZE_INPUTS",
-          "description": "Reads stages, decision_levels, population_types, and split_by sent as a string as the array of its codes, and split_by in any case. Set to false to reject both.",
+          "description": "Reads code lists sent as strings, folds split_by to lowercase, and reads canonical strings in numeric and boolean inputs. Set to false to disable these conversions.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -139,7 +139,7 @@
         },
         {
           "name": "UNHCR_NORMALIZE_INPUTS",
-          "description": "Reads stages, decision_levels, population_types, and split_by sent as a string as the array of its codes, and split_by in any case. Set to false to reject both.",
+          "description": "Reads code lists sent as strings, folds split_by to lowercase, and reads canonical strings in numeric and boolean inputs. Set to false to disable these conversions.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"

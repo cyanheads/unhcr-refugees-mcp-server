@@ -86,8 +86,8 @@
       "default": true
     },
     "UNHCR_NORMALIZE_INPUTS": {
-      "title": "Normalize list inputs",
-      "description": "Read stages, decision_levels, population_types, and split_by sent as a string as the array of its codes, and split_by in any case. Off rejects both.",
+      "title": "Normalize tool inputs",
+      "description": "Read code lists sent as strings, fold split_by to lowercase, and read canonical strings in numeric and boolean inputs. Off disables these conversions.",
       "type": "boolean",
       "required": false,
       "default": true

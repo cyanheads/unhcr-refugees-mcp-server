@@ -274,7 +274,14 @@ export interface FootnoteFault {
   respond: FakeIntercept['respond'];
 }
 
-/** The footnote faults every data tool fails the call on, though its data page arrived. */
+const outageRecovery = {
+  retryAttempts: 3,
+  operation: 'UNHCR API request',
+  retryable: true,
+  recovery: { hint: 'Wait briefly, then retry the same call.' },
+};
+
+/** The footnote faults every data tool fails the cold call on, though its data page arrived. */
 export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
   {
     fault: 'a 429 asking for a wait past the deadline',
@@ -297,7 +304,7 @@ export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
     requests: 3,
     code: JsonRpcErrorCode.ServiceUnavailable,
     message: 'UNHCR returned HTTP 503',
-    data: { status: 503, statusCode: 503, retryAttempts: 3, operation: 'UNHCR API request' },
+    data: { status: 503, statusCode: 503, ...outageRecovery },
   },
   {
     fault: 'an HTML 200 on every attempt',
@@ -305,7 +312,7 @@ export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
     requests: 3,
     code: JsonRpcErrorCode.ServiceUnavailable,
     message: 'UNHCR API returned a response that is not JSON.',
-    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+    data: outageRecovery,
   },
   {
     fault: 'JSON without an items array on every attempt',
@@ -313,7 +320,7 @@ export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
     requests: 3,
     code: JsonRpcErrorCode.ServiceUnavailable,
     message: 'UNHCR API returned JSON without an items array.',
-    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+    data: outageRecovery,
   },
   {
     fault: 'an empty list on every attempt',
@@ -321,7 +328,7 @@ export const FOOTNOTE_FAULTS: readonly FootnoteFault[] = [
     requests: 3,
     code: JsonRpcErrorCode.ServiceUnavailable,
     message: 'UNHCR API returned an empty reference list.',
-    data: { retryAttempts: 3, operation: 'UNHCR API request' },
+    data: outageRecovery,
   },
   {
     fault: 'a 404',

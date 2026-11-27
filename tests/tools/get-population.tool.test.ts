@@ -323,7 +323,7 @@ describe('success, both surfaces', () => {
       notice,
     });
     const text = textOf(result.content);
-    expect(text).toContain('_No year-end rows._');
+    expect(text).toContain('_No population rows._');
     expect(text).toContain('**Footnotes:** none match (0 total)');
     expect(text).toContain(`> ${notice}`);
   });
@@ -793,7 +793,7 @@ describe('companion series', () => {
       '| 2024 | State of Palestine [PSE · UNHCR GAZ] | Syrian Arab Rep. [SYR · UNHCR SYR] | — | — | — | — | — | — | — | — | — | 582,745 |',
     );
     expect(text).toContain(`- ${note}`);
-    expect(text).not.toContain('_No year-end rows._');
+    expect(text).not.toContain('_No population rows._');
   });
 
   it('merges a key both companions report, without a UNHCR row, into one row', async () => {
@@ -989,10 +989,10 @@ describe('nowcast', () => {
       footnotes_total: 0,
       nowcast: [expect.objectContaining({ asylum_iso3: 'JOR', refugees: 345321 })],
       notice:
-        "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country.",
+        "Population rows stop at 2025, so none fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country.",
     });
     expect(dataRequests('population')).toHaveLength(0);
-    expect(textOf(result.content)).toContain('_No year-end rows._');
+    expect(textOf(result.content)).toContain('_No population rows._');
   });
 
   it('says so when the nowcast has no row for the asylum scope', async () => {
@@ -1002,7 +1002,7 @@ describe('nowcast', () => {
       include_nowcast: true,
     });
     expect(structuredOf(result).notice).toBe(
-      "Year-end figures stop at 2025, and UNHCR's nowcast has no row for this asylum scope.",
+      "Population rows stop at 2025, and UNHCR's nowcast has no row for this asylum scope.",
     );
     expect(textOf(result.content)).toContain('_No nowcast rows for this asylum scope._');
   });
@@ -1043,7 +1043,7 @@ describe('nowcast', () => {
       include_nowcast: true,
     });
     const notice =
-      "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's 2026 estimate of refugees and asylum-seekers by asylum country.";
+      "Population rows stop at 2025, so none fall in the requested window. The nowcast is UNHCR's 2026 estimate of refugees and asylum-seekers by asylum country.";
     expect(structuredOf(result).notice).toBe(notice);
     expect(textOf(result.content)).toContain(`> ${notice}`);
   });
@@ -1259,7 +1259,7 @@ describe('nowcast', () => {
       [
         'alone, after the latest year',
         { asylum: 'JPN', year_from: 2026, include_nowcast: true, stage: true },
-        "Year-end figures stop at 2025, and UNHCR's nowcast has no row for this asylum scope.",
+        "Population rows stop at 2025, and UNHCR's nowcast has no row for this asylum scope.",
       ],
     ] as const)(
       'never stages an empty nowcast, even on request, nor says it could not, on both surfaces (%s)',
@@ -1331,7 +1331,7 @@ describe('nowcast', () => {
       [
         'alone, after the latest year',
         { asylum: 'JOR', year_from: 2026, include_nowcast: true, stage: true },
-        "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. stage was ignored: dataframes are unavailable in this deployment.",
+        "Population rows stop at 2025, so none fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. stage was ignored: dataframes are unavailable in this deployment.",
       ],
       [
         'with both tables cut',
@@ -1362,7 +1362,7 @@ describe('nowcast', () => {
       expect(staged.row_count).toBe(3);
       expect(structured).not.toHaveProperty('truncated');
       expect(structured.notice).toBe(
-        `Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. Showing 2 of 3 nowcast rows. ${nowcastPointer(staged.name, 3)}`,
+        `Population rows stop at 2025, so none fall in the requested window. The nowcast is UNHCR's August 2026 estimate of refugees and asylum-seekers by asylum country. Showing 2 of 3 nowcast rows. ${nowcastPointer(staged.name, 3)}`,
       );
       const text = textOf(result.content);
       expect(text).toContain('**Nowcast rows:** 2 shown of 3 total');
@@ -1752,7 +1752,7 @@ describe('format', () => {
       include_nowcast: true,
     });
     const notice =
-      "Year-end figures stop at 2025, so no population rows fall in the requested window. The nowcast is UNHCR's August ### Injected 2026 estimate of refugees and asylum-seekers by asylum country.";
+      "Population rows stop at 2025, so none fall in the requested window. The nowcast is UNHCR's August ### Injected 2026 estimate of refugees and asylum-seekers by asylum country.";
     expect(structuredOf(result).notice).toBe(notice);
     expect(textOf(result.content)).toContain(notice);
   });

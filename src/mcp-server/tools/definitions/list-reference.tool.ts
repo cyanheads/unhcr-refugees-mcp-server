@@ -12,8 +12,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { ASYLUM_CODES, DATASETS, POPULATION_TYPES } from '@/services/unhcr/codes.js';
 import { COUNTRY_ALIASES, normalizeName } from '@/services/unhcr/country-aliases.js';
 import { footnoteSpan } from '@/services/unhcr/footnote-match.js';
+import { reportingPeriods } from '@/services/unhcr/reporting-periods.js';
 import type { Country } from '@/services/unhcr/types.js';
-import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { getUnhcrService, staleReferenceNotices } from '@/services/unhcr/unhcr-api-service.js';
 import { blankAsUnset } from '../shared/inputs.js';
 import { cell, inline, table } from '../shared/markdown.js';
 
@@ -146,7 +147,11 @@ export const listReferenceTool = tool('unhcr_list_reference', {
             measure: z
               .enum(['stock', 'flow'])
               .nullable()
-              .describe('stock (year-end) or flow (during the year); null for footnotes.'),
+              .describe('Stock at a point in time or flow during a period; null for footnotes.'),
+            latest_reporting_period: z
+              .string()
+              .nullable()
+              .describe('Reporting period for the latest row year, or null for footnotes.'),
             first_year: z.number().int().describe('First year with data.'),
             latest_year: z.number().int().describe('Latest year with data.'),
             note: z.string().describe('What the dataset holds.'),
@@ -182,7 +187,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
             label: z.string().describe('Population-type name.'),
             measure: z
               .enum(['stock', 'flow'])
-              .describe('stock (year-end) or flow (during the year).'),
+              .describe('Stock at a point in time or flow during a period.'),
             definition: z.string().describe('What the type counts.'),
           })
           .describe('One UNHCR population type.'),
@@ -205,7 +210,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
       .string()
       .optional()
       .describe(
-        "Guidance when name_contains matched nothing or does not apply to the topic, or UNHCR's name and the ISO3 of the one country a common English name was read as.",
+        'Stale reference lists used and their ages, or guidance about what name_contains matched or why it was ignored.',
       ),
     totalCount: z
       .number()
@@ -228,9 +233,16 @@ export const listReferenceTool = tool('unhcr_list_reference', {
   async handler(input, ctx) {
     const service = getUnhcrService();
     const query = input.name_contains?.trim() ?? '';
+    const notices: string[] = [];
     if (query !== '' && input.topic !== 'countries') {
-      ctx.enrich.notice('name_contains applies only to topic countries and was ignored.');
+      notices.push('name_contains applies only to topic countries and was ignored.');
     }
+
+    const finish = <T>(output: T): T => {
+      notices.push(...staleReferenceNotices(ctx));
+      if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+      return output;
+    };
 
     switch (input.topic) {
       case 'countries': {
@@ -266,30 +278,30 @@ export const listReferenceTool = tool('unhcr_list_reference', {
           }));
         ctx.enrich.total(countries.length);
         if (aliased) {
-          ctx.enrich.notice(
+          notices.push(
             `Read "${name}" as ${inline(aliased.name)} (ISO3 ${aliased.iso3}), UNHCR's name for the country.`,
           );
         } else if (countries.length === 0) {
           const why = matchable
             ? ''
             : " Names match UNHCR's English spellings and codes match ISO3, ISO2, or UNHCR codes, so name_contains needs Latin letters or digits.";
-          ctx.enrich.notice(
+          notices.push(
             `No country name or code matched "${inline(query)}".${why} Call unhcr_list_reference (topic countries) without name_contains to browse the full list.`,
           );
         }
-        return { topic: input.topic, countries };
+        return finish({ topic: input.topic, countries });
       }
 
       case 'regions': {
         const { regions } = await service.regions(ctx);
-        return {
+        return finish({
           topic: input.topic,
           regions: regions.map((region) => ({
             id: region.id,
             name: region.name,
             country_count: region.countries.length,
           })),
-        };
+        });
       }
 
       case 'coverage': {
@@ -303,6 +315,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
           service.nowcastPeriod(ctx),
         ]);
         const span = footnoteSpan(footnotes);
+        const observedAt = Date.now();
         const coverage = DATASETS.flatMap((info, index) => {
           const years =
             info.endpoint === 'footnotes'
@@ -316,21 +329,25 @@ export const listReferenceTool = tool('unhcr_list_reference', {
               measure: info.measure,
               first_year: years.firstYear,
               latest_year: years.latestYear,
+              latest_reporting_period:
+                info.endpoint === 'footnotes'
+                  ? null
+                  : (reportingPeriods(info.endpoint, [years.latestYear], observedAt)[0] ?? null),
               note: info.note,
             },
           ];
         });
-        return { topic: input.topic, coverage, nowcast };
+        return finish({ topic: input.topic, coverage, nowcast });
       }
 
       case 'population_types':
-        return {
+        return finish({
           topic: input.topic,
           population_types: POPULATION_TYPES.map((type) => ({ ...type })),
-        };
+        });
 
       case 'asylum_codes':
-        return {
+        return finish({
           topic: input.topic,
           asylum_codes: {
             authority: [...ASYLUM_CODES.authority],
@@ -338,7 +355,7 @@ export const listReferenceTool = tool('unhcr_list_reference', {
             decision_level: [...ASYLUM_CODES.decision_level],
             unit: [...ASYLUM_CODES.unit],
           },
-        };
+        });
     }
   },
 
@@ -395,13 +412,22 @@ export const listReferenceTool = tool('unhcr_list_reference', {
     if (result.coverage) {
       lines.push(
         table(
-          ['Dataset', 'Tool', 'Measure', 'First year', 'Latest year', 'Note'],
+          [
+            'Dataset',
+            'Tool',
+            'Measure',
+            'First year',
+            'Latest year',
+            'Latest reporting period',
+            'Note',
+          ],
           result.coverage.map((entry) => [
             entry.dataset,
             entry.tool,
             entry.measure ?? '—',
             String(entry.first_year),
             String(entry.latest_year),
+            entry.latest_reporting_period === null ? '—' : cell(entry.latest_reporting_period),
             cell(entry.note),
           ]),
         ),

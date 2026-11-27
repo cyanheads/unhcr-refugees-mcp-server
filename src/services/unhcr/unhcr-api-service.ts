@@ -37,6 +37,7 @@ import { buildCountryTable, type CountryTable } from './country-input.js';
 import { type Footnote, toFootnote } from './footnote-match.js';
 import { toCount, toDataRow, toIdentityText, toYear, type ValueTally } from './normalize.js';
 import { MAX_CACHED_BODY, ResponseCache } from './response-cache.js';
+import { isLoadDeadline, loadDeadline, SharedLoad } from './shared-load.js';
 import {
   APPLICATION_FIELDS,
   type AsylumApplicationRow,
@@ -79,7 +80,19 @@ export const CALL_BUDGET_MS = 45_000;
 const ATTEMPT_TIMEOUT_MS = 30_000;
 const RESPONSE_TTL_MS = 6 * 60 * 60 * 1000;
 const REFERENCE_TTL_MS = 24 * 60 * 60 * 1000;
+const REFERENCE_MAX_AGE_MS = 7 * REFERENCE_TTL_MS;
+const REFERENCE_REFRESH_COOLDOWN_MS = 60_000;
+const REFERENCE_REFRESH_BUDGET_MS = 10_000;
+const STALE_REFERENCES = {
+  countries: 'countries',
+  regions: 'regional bureaus',
+  footnotes: 'footnotes',
+} as const;
+type StaleReference = keyof typeof STALE_REFERENCES;
+type ReferenceKey = StaleReference | `coverage/${ProbedDataset}` | 'nowcast-period';
+const referenceStaleness = new WeakMap<Context, Map<StaleReference, number>>();
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
+const OUTAGE_HINT = 'Wait briefly, then retry the same call.';
 /** Deadline recovery with the response cache off: a retry starts the walk over. */
 const DEADLINE_HINT =
   'Narrow the year window or drop expand so the call needs fewer upstream requests, then retry.';
@@ -188,12 +201,14 @@ function queryParams(query: DatasetQuery): RequestParams {
   };
 }
 
-/**
- * Validate a response body as the page envelope. A 200 that is not JSON, or
- * JSON without an `items` array, is a transient upstream fault
- * (`ServiceUnavailable`), not a serialization bug on this side.
- */
-function parseEnvelope(body: string): Envelope {
+interface ReferencePage {
+  accepts: (row: RawRow) => boolean;
+  index: number;
+  maxPages?: number;
+}
+
+/** Validate the envelope and any reference-specific pagination and row requirements. */
+function parseEnvelope(body: string, reference?: ReferencePage): Envelope {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -204,23 +219,48 @@ function parseEnvelope(body: string): Envelope {
     throw serviceUnavailable('UNHCR API returned JSON without an items array.');
   }
   const maxPages = Number(parsed.maxPages);
+  const items = parsed.items.filter(isRecord);
+  if (reference) {
+    if (!items.some(reference.accepts)) {
+      throw serviceUnavailable('UNHCR API returned an empty reference list.');
+    }
+    if (
+      parsed.page !== reference.index ||
+      typeof parsed.maxPages !== 'number' ||
+      !Number.isSafeInteger(maxPages) ||
+      maxPages < reference.index ||
+      (reference.maxPages !== undefined && maxPages !== reference.maxPages)
+    ) {
+      throw serviceUnavailable('UNHCR API returned inconsistent pagination for a reference list.');
+    }
+  }
   return {
-    items: parsed.items.filter(isRecord),
+    items,
     maxPages: Number.isInteger(maxPages) && maxPages >= 0 ? maxPages : 1,
   };
 }
 
-/**
- * {@link parseEnvelope} for a list UNHCR never publishes empty. An empty one is
- * the same transient fault as a missing `items`: read as "there are none", it
- * would stand for the reference data's whole 24 h.
- */
-function parseReference(body: string): Envelope {
-  const envelope = parseEnvelope(body);
-  if (envelope.items.length === 0) {
-    throw serviceUnavailable('UNHCR API returned an empty reference list.');
-  }
-  return envelope;
+/** A bounded outage can use an already complete reference list. */
+function isTransientRefreshFailure(error: unknown): error is McpError {
+  return (
+    error instanceof McpError &&
+    error.data?.retryable !== false &&
+    (error.code === JsonRpcErrorCode.ServiceUnavailable ||
+      error.code === JsonRpcErrorCode.Timeout ||
+      error.code === JsonRpcErrorCode.RateLimited)
+  );
+}
+
+/** Stale lists used by this caller, for the tool to compose with its other notices. */
+export function staleReferenceNotices(ctx: Context): string[] {
+  const stale = referenceStaleness.get(ctx);
+  if (!stale) return [];
+  return [...stale]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, ageMs]) => {
+      const hours = Math.floor(ageMs / 3_600_000);
+      return `Stale UNHCR ${STALE_REFERENCES[key]} (${hours} hours old) were used because the refresh failed.`;
+    });
 }
 
 /**
@@ -293,6 +333,13 @@ function toCountry(raw: RawRow): Country | undefined {
   };
 }
 
+function toBureau(raw: RawRow): { id: number; name: string } | undefined {
+  const id = toYear(raw.id);
+  const name = toIdentityText(raw.name);
+  if (id === undefined || !Number.isSafeInteger(id) || id <= 0 || !name) return;
+  return { id, name };
+}
+
 /** The procedure codes an asylum row is split by; `unitColumn` differs per endpoint. */
 function toAsylumCodes(raw: RawRow, unitColumn: 'app_pc' | 'dec_pc'): AsylumCodes {
   return {
@@ -319,8 +366,14 @@ function toNowcastRow(raw: RawRow, tally: ValueTally): NowcastRow | undefined {
 }
 
 interface ReferenceEntry {
+  retryAt?: number;
   storedAt: number;
-  value: Promise<unknown>;
+  value: unknown;
+}
+
+interface ReferenceResult {
+  staleAgeMs?: number;
+  value: unknown;
 }
 
 export class UnhcrApiService {
@@ -328,10 +381,11 @@ export class UnhcrApiService {
   private readonly callDeadlines = new WeakMap<object, number>();
   private readonly config: UnhcrServiceConfig;
   private readonly fetchImpl: typeof fetch;
-  private readonly inflight = new Map<string, Promise<Envelope>>();
+  private readonly inflight = new SharedLoad<Envelope>();
   private readonly now: () => number;
   private readonly pacer: Pacer;
   private readonly references = new Map<string, ReferenceEntry>();
+  private readonly referenceLoads = new SharedLoad<ReferenceResult>();
 
   constructor(options: UnhcrServiceOptions) {
     this.config = options.config;
@@ -354,8 +408,8 @@ export class UnhcrApiService {
   /** UNHCR's country table (232 entries), cached 24 h. */
   countries(ctx: Context, options?: CallOptions): Promise<CountryReference> {
     return this.run(ctx, options, (deadlineAt) =>
-      this.reference('countries', async () => {
-        const { items } = await this.walk('countries', {}, ctx, deadlineAt, parseReference);
+      this.reference('countries', ctx, deadlineAt, async (refreshDeadlineAt) => {
+        const items = await this.referenceItems('countries', {}, ctx, refreshDeadlineAt);
         const list = items.flatMap((raw) => toCountry(raw) ?? []);
         return { list, table: buildCountryTable(list) };
       }),
@@ -369,18 +423,21 @@ export class UnhcrApiService {
    */
   regions(ctx: Context, options?: CallOptions): Promise<RegionReference> {
     return this.run(ctx, options, (deadlineAt) =>
-      this.reference('regions', async () => {
-        const { items } = await this.walk('regions', {}, ctx, deadlineAt, parseReference);
+      this.reference('regions', ctx, deadlineAt, async (refreshDeadlineAt) => {
+        const items = await this.referenceItems('regions', {}, ctx, refreshDeadlineAt);
         const regions = await Promise.all(
           items.flatMap((raw) => {
-            const id = Number(raw.id);
-            const name = toIdentityText(raw.name);
-            if (!Number.isInteger(id) || !name) return [];
+            const bureau = toBureau(raw);
+            if (!bureau) return [];
             return [
-              this.walk('countries', { unhcrRegion: id }, ctx, deadlineAt, parseReference).then(
-                ({ items: members }): UnhcrRegion => ({
-                  id,
-                  name,
+              this.referenceItems(
+                'countries',
+                { unhcrRegion: bureau.id },
+                ctx,
+                refreshDeadlineAt,
+              ).then(
+                (members): UnhcrRegion => ({
+                  ...bureau,
                   countries: members.flatMap((member) => toIdentityText(member.iso) ?? []),
                 }),
               ),
@@ -404,7 +461,7 @@ export class UnhcrApiService {
    */
   coverage(dataset: ProbedDataset, ctx: Context, options?: CallOptions): Promise<Coverage> {
     return this.run(ctx, options, (deadlineAt) =>
-      this.reference(`coverage/${dataset}`, async () => {
+      this.reference(`coverage/${dataset}`, ctx, deadlineAt, async () => {
         const first = await this.page(buildUrl(dataset, { limit: 1, page: 1 }), ctx, deadlineAt);
         const firstYear = toYear(first.items[0]?.year);
         const last =
@@ -427,7 +484,7 @@ export class UnhcrApiService {
   /** The month and year of the current-year nowcast snapshot, cached 24 h. */
   nowcastPeriod(ctx: Context, options?: CallOptions): Promise<NowcastPeriod> {
     return this.run(ctx, options, (deadlineAt) =>
-      this.reference('nowcast-period', async () => {
+      this.reference('nowcast-period', ctx, deadlineAt, async () => {
         const first = await this.page(
           buildUrl('nowcasting', { limit: 1, page: 1 }),
           ctx,
@@ -446,8 +503,8 @@ export class UnhcrApiService {
   /** All of UNHCR's footnotes, parsed and cached 24 h. */
   footnotes(ctx: Context, options?: CallOptions): Promise<Footnote[]> {
     return this.run(ctx, options, (deadlineAt) =>
-      this.reference('footnotes', async () => {
-        const { items } = await this.walk('footnotes', {}, ctx, deadlineAt, parseReference);
+      this.reference('footnotes', ctx, deadlineAt, async (refreshDeadlineAt) => {
+        const items = await this.referenceItems('footnotes', {}, ctx, refreshDeadlineAt);
         return items.map(toFootnote).filter((note) => note.text !== '');
       }),
     );
@@ -540,6 +597,7 @@ export class UnhcrApiService {
         dimensionParams('coa', asylum),
         ctx,
         deadlineAt,
+        { waiterSignal: ctx.signal },
       );
       const tally: ValueTally = { unexpected: 0 };
       const rows = items.flatMap((raw) => toNowcastRow(raw, tally) ?? []);
@@ -569,7 +627,9 @@ export class UnhcrApiService {
   ): Promise<DatasetResult<DataRow<F> & C>> {
     return this.run(ctx, options, async (deadlineAt) => {
       const params = { ...queryParams(query), ...shape.params };
-      const { items, complete } = await this.walk(endpoint, params, ctx, deadlineAt);
+      const { items, complete } = await this.walk(endpoint, params, ctx, deadlineAt, {
+        waiterSignal: ctx.signal,
+      });
       const tally: ValueTally = { unexpected: 0 };
       const rows: (DataRow<F> & C)[] = [];
       for (const raw of items) {
@@ -607,6 +667,7 @@ export class UnhcrApiService {
   ): Promise<T> {
     const deadlineAt = this.deadlineFor(ctx, options);
     try {
+      if (deadlineAt <= Date.now() && !ctx.signal.aborted) throw loadDeadline();
       return await raceSignal(work(deadlineAt), ctx.signal);
     } catch (error) {
       throw this.toCallerError(error, ctx);
@@ -652,22 +713,108 @@ export class UnhcrApiService {
         { cause: error },
       );
     }
-    if (error.code === JsonRpcErrorCode.Timeout && data.reason === 'retry_deadline_exceeded') {
+    if (isLoadDeadline(error)) {
       return deadlineExceeded(this.config.cacheMaxBytes, error);
+    }
+    if (
+      error.code === JsonRpcErrorCode.ServiceUnavailable &&
+      data.retryable !== false &&
+      data.operation === 'UNHCR API request' &&
+      typeof data.retryAttempts === 'number'
+    ) {
+      return serviceUnavailable(
+        error.message,
+        { ...data, retryable: true, recovery: { hint: OUTAGE_HINT } },
+        { cause: error },
+      );
     }
     return error;
   }
 
-  /** A promise cached for 24 h, shared by concurrent callers, dropped on failure. */
-  private reference<T>(key: string, load: () => Promise<T>): Promise<T> {
+  /** Keep successful reference values separate from in-flight refreshes and their failures. */
+  private async reference<T>(
+    key: ReferenceKey,
+    ctx: Context,
+    deadlineAt: number,
+    load: (deadlineAt: number) => Promise<T>,
+  ): Promise<T> {
     const hit = this.references.get(key);
-    if (hit && this.now() - hit.storedAt < REFERENCE_TTL_MS) return hit.value as Promise<T>;
-    const value = load();
-    this.references.set(key, { storedAt: this.now(), value });
-    value.catch(() => {
-      if (this.references.get(key)?.value === value) this.references.delete(key);
+    const now = this.now();
+    if (hit && now - hit.storedAt < REFERENCE_TTL_MS) return hit.value as T;
+
+    const staleKey = Object.hasOwn(STALE_REFERENCES, key) ? (key as StaleReference) : undefined;
+    const fallback =
+      staleKey && hit && now - hit.storedAt <= REFERENCE_MAX_AGE_MS ? hit : undefined;
+    const result =
+      fallback?.retryAt !== undefined && now < fallback.retryAt
+        ? { value: fallback.value, staleAgeMs: now - fallback.storedAt }
+        : await this.referenceLoads.get(
+            key,
+            deadlineAt,
+            async () => {
+              const startedAt = Date.now();
+              // Reserve time for the caller's other work, even when a warm refresh stalls.
+              const refreshDeadlineAt = fallback
+                ? startedAt +
+                  Math.min(REFERENCE_REFRESH_BUDGET_MS, Math.floor((deadlineAt - startedAt) / 2))
+                : deadlineAt;
+              try {
+                const value = await load(refreshDeadlineAt);
+                this.references.set(key, { storedAt: this.now(), value });
+                return { value };
+              } catch (error) {
+                const failedAt = this.now();
+                if (
+                  !fallback ||
+                  Date.now() >= deadlineAt ||
+                  failedAt - fallback.storedAt > REFERENCE_MAX_AGE_MS ||
+                  !isTransientRefreshFailure(error)
+                )
+                  throw error;
+
+                const upstreamDelayMs = retryAfterSeconds(error.data?.retryAfter) * 1_000;
+                fallback.retryAt =
+                  failedAt + Math.max(REFERENCE_REFRESH_COOLDOWN_MS, upstreamDelayMs);
+                return { value: fallback.value, staleAgeMs: failedAt - fallback.storedAt };
+              }
+            },
+            ctx.signal,
+          );
+    if (staleKey && result.staleAgeMs !== undefined && !ctx.signal.aborted) {
+      let stale = referenceStaleness.get(ctx);
+      if (!stale) {
+        stale = new Map();
+        referenceStaleness.set(ctx, stale);
+      }
+      stale.set(staleKey, result.staleAgeMs);
+    }
+    return result.value as T;
+  }
+
+  /** Reference lists used for validation and caveats must include every page. */
+  private async referenceItems(
+    endpoint: 'countries' | 'regions' | 'footnotes',
+    params: RequestParams,
+    ctx: Context,
+    deadlineAt: number,
+  ): Promise<RawRow[]> {
+    const referenceRow =
+      endpoint === 'footnotes'
+        ? (row: RawRow) => toFootnote(row).text !== ''
+        : endpoint === 'regions'
+          ? (row: RawRow) => toBureau(row) !== undefined
+          : params.unhcrRegion !== undefined
+            ? (row: RawRow) => toIdentityText(row.iso) !== null
+            : (row: RawRow) => toCountry(row) !== undefined;
+    const { complete, items } = await this.walk(endpoint, params, ctx, deadlineAt, {
+      referenceRow,
     });
-    return value;
+    if (!complete) {
+      throw serviceUnavailable('The UNHCR reference list exceeds this server’s row cap.', {
+        retryable: false,
+      });
+    }
+    return items;
   }
 
   /**
@@ -680,17 +827,31 @@ export class UnhcrApiService {
     params: RequestParams,
     ctx: Context,
     deadlineAt: number,
-    parse = parseEnvelope,
+    {
+      referenceRow,
+      waiterSignal,
+    }: { referenceRow?: ReferencePage['accepts']; waiterSignal?: AbortSignal } = {},
   ): Promise<{ complete: boolean; items: RawRow[] }> {
-    const url = (page: number) => buildUrl(endpoint, { ...params, limit: PAGE_SIZE, page });
-    const first = await this.page(url(1), ctx, deadlineAt, parse);
+    const fetchPage = (index: number, maxPages?: number) =>
+      this.page(
+        buildUrl(endpoint, { ...params, limit: PAGE_SIZE, page: index }),
+        ctx,
+        deadlineAt,
+        referenceRow
+          ? { accepts: referenceRow, index, ...(maxPages !== undefined && { maxPages }) }
+          : undefined,
+        waiterSignal,
+      );
+    const first = await fetchPage(1);
+    waiterSignal?.throwIfAborted();
     const pageCap = Math.ceil(this.config.maxRows / PAGE_SIZE);
     const lastPage = Math.min(first.maxPages, pageCap);
     const rest = await Promise.all(
-      Array.from({ length: Math.max(0, lastPage - 1) }, (_, i) =>
-        this.page(url(i + 2), ctx, deadlineAt),
-      ),
+      Array.from({ length: Math.max(0, lastPage - 1) }, (_, i) => fetchPage(i + 2, first.maxPages)),
     );
+    if (referenceRow && rest.some(({ maxPages }) => maxPages !== first.maxPages)) {
+      throw serviceUnavailable('UNHCR API returned inconsistent pagination for a reference list.');
+    }
     const items = [first, ...rest].flatMap((envelope) => envelope.items);
     return {
       items: items.slice(0, this.config.maxRows),
@@ -703,16 +864,17 @@ export class UnhcrApiService {
     url: string,
     ctx: Context,
     deadlineAt: number,
-    parse = parseEnvelope,
+    reference?: ReferencePage,
+    waiterSignal?: AbortSignal,
   ): Promise<Envelope> {
-    const cached = this.cache.get(url);
-    if (cached !== undefined) return Promise.resolve(parse(cached));
-    let shared = this.inflight.get(url);
-    if (!shared) {
-      shared = this.load(url, ctx, deadlineAt, parse).finally(() => this.inflight.delete(url));
-      this.inflight.set(url, shared);
-    }
-    return shared;
+    const cached = reference ? undefined : this.cache.get(url);
+    if (cached !== undefined) return Promise.resolve(parseEnvelope(cached));
+    return this.inflight.get(
+      url,
+      deadlineAt,
+      () => this.load(url, ctx, deadlineAt, reference),
+      waiterSignal,
+    );
   }
 
   /**
@@ -724,18 +886,19 @@ export class UnhcrApiService {
     url: string,
     ctx: Context,
     deadlineAt: number,
-    parse: typeof parseEnvelope,
+    reference: ReferencePage | undefined,
   ): Promise<Envelope> {
     const budget = deadlineAt - Date.now();
-    if (budget <= 0) return Promise.reject(deadlineExceeded(this.config.cacheMaxBytes));
+    if (budget <= 0) return Promise.reject(loadDeadline());
     return withRetry(
       async ({ signal }) => {
         const body = await this.pacer.run(() => this.fetchBody(url, signal, deadlineAt), {
           signal,
           maxWaitMs: Math.max(0, deadlineAt - Date.now()),
         });
-        const envelope = parse(body);
-        this.cache.set(url, body);
+        const envelope = parseEnvelope(body, reference);
+        // A failed refresh must not pin partial reference pages across cooldowns.
+        if (!reference) this.cache.set(url, body);
         return envelope;
       },
       {

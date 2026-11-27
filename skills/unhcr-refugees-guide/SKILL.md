@@ -4,12 +4,12 @@ description: Gates for answering displacement and asylum questions with the unhc
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
 
-`unhcr-refugees-mcp-server` serves UNHCR's Refugee Population Statistics Database, keyless. It covers year-end displacement stocks, sex and age breakdowns, asylum applications and decisions, and durable solutions, with UNRWA's Palestine refugees and IDMC's conflict-IDP estimate beside population rows. Every series is annual except the nowcast, a single current-month estimate of refugees and asylum-seekers by asylum country. Out of reach: UNHCR's mid-year statistics, any place below the country (camps, provinces), ethnic groups as a dimension, and the country refugees were resettled from.
+`unhcr-refugees-mcp-server` serves UNHCR's Refugee Population Statistics Database, keyless. It covers displacement stocks, sex and age breakdowns, asylum applications and decisions, and durable solutions, with UNRWA's Palestine refugees and IDMC's conflict-IDP estimate beside population rows. Check `reporting_periods` before comparing years. Official stocks may be dated June or December, and flows may cover January–June or the whole year. UNRWA has its own reporting period and IDMC may be carried forward from a prior year. Out of reach: any place below the country (camps, provinces), ethnic groups as a dimension, and the country refugees were resettled from.
 
 ## Identifiers
 
@@ -32,7 +32,7 @@ metadata:
 
 **Palestine refugees are two disjoint series.** UNRWA's registered refugees are `unrwa_refugees` on origin PSE rows for asylum PSE, JOR, LBN, SYR, and UNK, and on world rows; `refugees` is 0 or null there. Palestinians under UNHCR's mandate are `refugees` on origin PSE rows elsewhere (Greece, Belgium, Iraq, …). A Palestine refugee total, or a world displacement total, adds the two.
 
-**The nowcast answers "now" for a host country only.** It has no origin dimension and no history: one current-month estimate per asylum country, all origins together (`unhcr_list_reference` topic `coverage` names the month). "How many Syrians are in Türkiye now" has no answer past the latest year-end row, so say so rather than quoting Türkiye's nowcast. The nowcast and the year-end stock count largely the same people. Report the two side by side with their dates, never add or average them, and never read their difference as arrivals. The nowcast stages as its own table, so keep it out of year-end SQL.
+**The nowcast answers "now" for a host country only.** It has no origin dimension and no history: one current-month estimate per asylum country, all origins together (`unhcr_list_reference` topic `coverage` names the month). "How many Syrians are in Türkiye now" has no answer past the latest dated population row, so say so rather than quoting Türkiye's nowcast. The nowcast and the published stock count largely the same people. Report the two side by side with their dates, never add or average them, and never read their difference as arrivals. The nowcast stages as its own table, so keep it separate in SQL.
 
 **Bureau and bloc totals come from SQL.** No input filters by region, and listed codes come back one row each, never summed.
 - For a UNHCR bureau, expand the dimension, stage, and `GROUP BY asylum_unhcr_region` (hosts) or `origin_unhcr_region` (origins).
@@ -52,7 +52,7 @@ metadata:
 
 **Read a footnote before applying it.** A caveat naming only an asylum country attaches to every origin's row there. Germany's caveat about arrivals from Ukraine, for example, attaches to the Syrian row in Germany. A call returns at most 20 caveats, those on its inline rows first. When `footnotes_total` exceeds the number returned, list the origin and asylum codes of the rows you report, split across calls until each call's `footnotes_total` equals the number it returns: at end-2025 the top 30 Syrian hosts carry 17 caveats, the top 60 carry 26.
 
-**Read the footnotes before comparing asylum years.** `unhcr_get_asylum_applications` and `unhcr_get_asylum_decisions` return `footnotes` like the other data tools, and their `data_notes` call every row a calendar-year flow, which a footnote can narrow. UNHCR's caveat on the United States' 2024 applications and decisions limits them to January–June, so 2023 to 2024 is not a like-for-like fall. Every asylum row can carry a caveat whatever its counts, a zero included. A year with no row carries no caveat: an absent year has nothing to attach one to, so a gap in a series is not a clean year.
+**Read the footnotes before comparing asylum years.** `unhcr_get_asylum_applications` and `unhcr_get_asylum_decisions` return `footnotes` like the other data tools, and `reporting_periods` gives the release period, which a footnote can narrow. UNHCR's caveat on the United States' 2024 applications and decisions limits them to January–June, so 2023 to 2024 is not a like-for-like fall. Every asylum row can carry a caveat whatever its counts, a zero included. A year with no row carries no caveat: an absent year has nothing to attach one to, so a gap in a series is not a clean year.
 
 ## Workflows
 

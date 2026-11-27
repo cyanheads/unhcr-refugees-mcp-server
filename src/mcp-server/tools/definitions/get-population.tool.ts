@@ -1,5 +1,5 @@
 /**
- * @fileoverview unhcr_get_population — year-end displacement stocks by origin
+ * @fileoverview unhcr_get_population — displacement stocks by origin
  * and/or asylum country (1951 to the latest year), with UNRWA's Palestine
  * refugees and IDMC's conflict-IDP estimate joined beside each row as separate
  * series, matched UNHCR footnotes, and an optional current-year nowcast.
@@ -21,7 +21,7 @@ import {
   type RowIdentity,
 } from '@/services/unhcr/types.js';
 import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
-import { blankAsUnset, resultInputs, scopeInputs } from '../shared/inputs.js';
+import { blankAsUnset, resultInputs, scalarInput, scopeInputs } from '../shared/inputs.js';
 import { cell, count, inline, table } from '../shared/markdown.js';
 import {
   countField,
@@ -87,7 +87,7 @@ function joinCompanions(
 }
 
 const STOCK_NOTES = [
-  'Counts are year-end stocks: people in each situation on 31 December. returned_refugees and returned_idps are flows — returns during the calendar year, the same series unhcr_get_solutions reports — recorded against the country returned from and against the origin country itself, respectively.',
+  'Stocks count people in each situation at the reporting date. returned_refugees and returned_idps are the same flows unhcr_get_solutions reports, recorded against the country returned from and against the origin country itself, respectively. Check footnotes for country-specific dates.',
   'refugees includes people in refugee-like situations; idps counts conflict IDPs UNHCR protects or assists, including people in IDP-like situations.',
   'Rows for the same country as origin and asylum carry IDPs, host communities, and IDP returns.',
   'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
@@ -103,7 +103,7 @@ const snapshotLabel = (row: NowcastRow): string =>
 
 /**
  * The population result's data notes. `unexpectedValues` and `yearlessRows`
- * count the year-end and companion series; the nowcast's own counts are added
+ * count the population and companion series; the nowcast's own counts are added
  * here. `companionOnlyRows` counts the rows only UNRWA or IDMC reports.
  */
 function dataNotes(options: {
@@ -173,17 +173,21 @@ const nowcastSchema = z
   })
   .describe("One row of UNHCR's current-year estimate.");
 
+/** The population tool's current-year estimate toggle for one normalization mode. */
+export const includeNowcastInput = (normalize: boolean) =>
+  scalarInput('include_nowcast', z.boolean().default(false), normalize).describe(
+    "Append UNHCR's latest monthly estimate of refugees and asylum-seekers by asylum country: one current-year snapshot, independent of the year window. It is sorted and cut to limit on its own, and staged as its own dataframe (nowcast_dataset) when it overflows or stage is set. The nowcast has no origin dimension, so it is skipped when origin lists codes. When origin lists no codes, a window entirely after the latest published year returns the nowcast alone instead of failing.",
+  );
+
 export const getPopulationTool = tool('unhcr_get_population', {
   title: 'UNHCR displacement stocks',
   description:
-    "Get UNHCR year-end displacement stocks (1951 to the latest year) by country of origin and/or asylum: refugees, asylum-seekers, other people in need of international protection, IDPs, stateless people, others of concern, and host communities, plus refugees and IDPs who returned during the year. Stocks count people in a situation on 31 December, not arrivals. Palestine refugees under UNRWA's mandate and IDMC's conflict-IDP estimate are separate series shown beside each row. Set include_nowcast for UNHCR's current-year estimate by asylum country; for sex and age breakdowns, use unhcr_get_demographics.",
+    "Get UNHCR displacement stocks (1951 to the latest year) by country of origin and/or asylum: refugees, asylum-seekers, other people in need of international protection, IDPs, stateless people, others of concern, and host communities, plus refugees and IDPs who returned during the reporting period. Stocks count people in a situation at the reporting date. Palestine refugees under UNRWA's mandate and IDMC's conflict-IDP estimate are separate series shown beside each row. Set include_nowcast for UNHCR's monthly estimate by asylum country; for sex and age breakdowns, use unhcr_get_demographics.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     ...scopeInputs,
-    include_nowcast: blankAsUnset(z.boolean().default(false)).describe(
-      "Append UNHCR's latest monthly estimate of refugees and asylum-seekers by asylum country: one current-year snapshot, independent of the year window. It is sorted and cut to limit on its own, and staged as its own dataframe (nowcast_dataset) when it overflows or stage is set. The nowcast has no origin dimension, so it is skipped when origin lists codes. When origin lists no codes, a window entirely after the latest published year returns the nowcast alone instead of failing.",
-    ),
+    include_nowcast: includeNowcastInput(true),
     sort_by: blankAsUnset(
       z
         .enum([
@@ -318,6 +322,7 @@ export const getPopulationTool = tool('unhcr_get_population', {
     // What both branches hand finishRows, so the nowcast is sorted, cut, and staged one way.
     const finishFields = {
       sourceTool: 'unhcr_get_population',
+      dataset: 'population' as const,
       datasetLabel: 'population',
       queryParams: { ...input },
       sortBy: input.sort_by,
@@ -336,7 +341,7 @@ export const getPopulationTool = tool('unhcr_get_population', {
         const nowcast = await service.nowcast(failure.dimensions.asylum, ctx);
         const period = nowcast.rows[0];
         const { year_from: yearFrom, year_to: yearTo } = failure.window;
-        // No year-end rows exist here, so nothing is fetched for them; the scope echoes the requested window.
+        // No population rows exist here, so the scope echoes the requested window.
         const finished = await finishRows<JoinedRow>(ctx, {
           ...finishFields,
           scope: {
@@ -358,8 +363,8 @@ export const getPopulationTool = tool('unhcr_get_population', {
           notices: [],
           yearlessRows: 0,
           emptyNotice: period
-            ? `Year-end figures stop at ${failure.coverage.latestYear}, so no population rows fall in the requested window. The nowcast is UNHCR's ${snapshotLabel(period)} estimate of refugees and asylum-seekers by asylum country.`
-            : `Year-end figures stop at ${failure.coverage.latestYear}, and UNHCR's nowcast has no row for this asylum scope.`,
+            ? `Population rows stop at ${failure.coverage.latestYear}, so none fall in the requested window. The nowcast is UNHCR's ${snapshotLabel(period)} estimate of refugees and asylum-seekers by asylum country.`
+            : `Population rows stop at ${failure.coverage.latestYear}, and UNHCR's nowcast has no row for this asylum scope.`,
           nowcast: nowcast.rows,
         });
         return {
@@ -417,6 +422,11 @@ export const getPopulationTool = tool('unhcr_get_population', {
       ...finishFields,
       scope,
       rows,
+      reportingSources: [
+        { dataset: 'population', rows: population.rows },
+        { dataset: 'unrwa', rows: unrwa.rows },
+        { dataset: 'idmc', rows: idmc.rows },
+      ],
       fetchedRows: population.rows.length + unrwa.rows.length + idmc.rows.length + yearlessRows,
       complete: population.complete && unrwa.complete && idmc.complete,
       providers,
@@ -490,7 +500,7 @@ export const getPopulationTool = tool('unhcr_get_population', {
         '',
       );
     } else {
-      lines.push('_No year-end rows._', '');
+      lines.push('_No population rows._', '');
     }
 
     if (result.nowcast) {

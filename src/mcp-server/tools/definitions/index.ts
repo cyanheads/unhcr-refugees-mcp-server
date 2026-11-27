@@ -1,7 +1,7 @@
 /**
  * @fileoverview The tool list handed to `createApp()`. The count inputs
- * (`limit`, `preview`, `row_limit`) and the list inputs (`stages`,
- * `decision_levels`, `population_types`, `split_by`) take their schema here,
+ * (`limit`, `preview`, `row_limit`), the year and boolean inputs, and the
+ * code-list inputs take their schemas here,
  * per deployment: tool modules evaluate before `src/index.ts` loads `.env`, so
  * the clamp mode (`UNHCR_CLAMP_LIMITS`), the normalize mode
  * (`UNHCR_NORMALIZE_INPUTS`), and the canvas row cap reach the schemas through
@@ -16,14 +16,14 @@
 
 import { disabledTool, type ToolDefinition, tool, type z } from '@cyanheads/mcp-ts-core';
 import type { ErrorContract } from '@cyanheads/mcp-ts-core/errors';
-import { limitInput } from '../shared/inputs.js';
+import { limitInput, stageInput, yearInputs } from '../shared/inputs.js';
 import { dataframeDescribeTool } from './dataframe-describe.tool.js';
 import { dataframeDropTool } from './dataframe-drop.tool.js';
 import { defineDataframeQueryTool } from './dataframe-query.tool.js';
 import { applicationLists, getAsylumApplicationsTool } from './get-asylum-applications.tool.js';
 import { decisionLists, getAsylumDecisionsTool } from './get-asylum-decisions.tool.js';
 import { demographicLists, getDemographicsTool } from './get-demographics.tool.js';
-import { getPopulationTool } from './get-population.tool.js';
+import { getPopulationTool, includeNowcastInput } from './get-population.tool.js';
 import { getSolutionsTool } from './get-solutions.tool.js';
 import { listReferenceTool } from './list-reference.tool.js';
 
@@ -38,7 +38,8 @@ export interface ToolDefinitionOptions {
   dropEnabled: boolean;
   /**
    * `UNHCR_NORMALIZE_INPUTS`: true reads a list input sent as a string as the
-   * array of its codes, and `split_by` in any case; false rejects both.
+   * array of its codes, accepts `split_by` in any case, and reads canonical
+   * number and boolean strings in numeric and boolean fields.
    */
   normalizeInputs: boolean;
   /** The canvas row cap (`CANVAS_DEFAULT_ROW_LIMIT`), which caps `unhcr_dataframe_query`'s `row_limit`. */
@@ -65,16 +66,23 @@ function withInputs<
 /** Build the tool list for `createApp({ tools })`. */
 export function buildToolDefinitions(options: ToolDefinitionOptions) {
   const { clampLimits, normalizeInputs, rowLimitCap } = options;
-  const limit = limitInput(clampLimits);
+  const scalars = {
+    ...yearInputs(normalizeInputs),
+    limit: limitInput(clampLimits, normalizeInputs),
+    stage: stageInput(normalizeInputs),
+  };
   return [
     listReferenceTool,
-    withInputs(getPopulationTool, { limit }),
-    withInputs(getDemographicsTool, { limit, ...demographicLists(normalizeInputs) }),
-    withInputs(getAsylumApplicationsTool, { limit, ...applicationLists(normalizeInputs) }),
-    withInputs(getAsylumDecisionsTool, { limit, ...decisionLists(normalizeInputs) }),
-    withInputs(getSolutionsTool, { limit }),
+    withInputs(getPopulationTool, {
+      ...scalars,
+      include_nowcast: includeNowcastInput(normalizeInputs),
+    }),
+    withInputs(getDemographicsTool, { ...scalars, ...demographicLists(normalizeInputs) }),
+    withInputs(getAsylumApplicationsTool, { ...scalars, ...applicationLists(normalizeInputs) }),
+    withInputs(getAsylumDecisionsTool, { ...scalars, ...decisionLists(normalizeInputs) }),
+    withInputs(getSolutionsTool, scalars),
     dataframeDescribeTool,
-    defineDataframeQueryTool({ clamp: clampLimits, rowLimitCap }),
+    defineDataframeQueryTool({ clamp: clampLimits, normalize: normalizeInputs, rowLimitCap }),
     options.dropEnabled
       ? dataframeDropTool
       : disabledTool(dataframeDropTool, {

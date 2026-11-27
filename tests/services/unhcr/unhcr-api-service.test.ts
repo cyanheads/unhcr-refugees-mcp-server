@@ -402,6 +402,91 @@ describe('upstream failures', () => {
 });
 
 describe('pacing and the call deadline', () => {
+  describe('shared load deadlines', () => {
+    beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }));
+    afterEach(() => vi.useRealTimers());
+
+    it.each(['footnotes', 'population'] as const)(
+      'restarts a shared %s load once for surviving callers',
+      async (endpoint) => {
+        const { fake, service } = setup();
+        fake.intercept({ endpoint, once: true, respond: hangUntilAborted });
+        const call = (deadlineMs: number) => {
+          const ctx = createMockContext();
+          return endpoint === 'footnotes'
+            ? service.footnotes(ctx, { deadlineMs })
+            : service.population(syrQuery, ctx, { deadlineMs });
+        };
+        const first = rejectionOf(call(5_000));
+        await vi.advanceTimersByTimeAsync(4_000);
+        const surviving = Promise.allSettled([call(5_000), call(5_000)]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect((await first).code).toBe(JsonRpcErrorCode.Timeout);
+        expect((await surviving).map(({ status }) => status)).toEqual(['fulfilled', 'fulfilled']);
+        expect(fake.urlsFor(endpoint)).toHaveLength(2);
+      },
+    );
+
+    it('bounds a shorter waiter and keeps starter cancellation isolated', async () => {
+      const { fake, service } = setup();
+      const starter = new AbortController();
+      fake.intercept({
+        endpoint: 'footnotes',
+        respond: (request) =>
+          new Promise((resolve, reject) => {
+            request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+              once: true,
+            });
+            setTimeout(() => resolve(Response.json(envelope([{ footnote: 'Example' }]))), 500);
+          }),
+      });
+      const first = service.footnotes(createMockContext({ signal: starter.signal }), {
+        deadlineMs: 1_000,
+      });
+      const cancelled = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.advanceTimersByTimeAsync(100);
+      const third = service.footnotes(createMockContext(), { deadlineMs: 1_000 });
+      let timedOutAt: number | undefined;
+      const startedAt = Date.now();
+      const shorter = service
+        .footnotes(createMockContext(), { deadlineMs: 100 })
+        .catch((error: unknown) => {
+          timedOutAt = Date.now();
+          return error;
+        });
+      starter.abort();
+      await cancelled;
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await shorter).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+      expect(timedOutAt).toBe(startedAt + 100);
+      await expect(third).resolves.toEqual(expect.any(Array));
+      expect(fake.urlsFor('footnotes')).toHaveLength(1);
+    });
+
+    it.each(['footnotes', 'population'] as const)(
+      'does not restart expired %s work when the only late waiter cancelled',
+      async (endpoint) => {
+        const { fake, service } = setup();
+        const waiter = new AbortController();
+        const call = (signal?: AbortSignal) => {
+          const ctx = createMockContext(signal === undefined ? undefined : { signal });
+          return endpoint === 'footnotes'
+            ? service.footnotes(ctx, { deadlineMs: 5_000 })
+            : service.population(syrQuery, ctx, { deadlineMs: 5_000 });
+        };
+        fake.intercept({ endpoint, once: true, respond: hangUntilAborted });
+        const expired = rejectionOf(call());
+        await vi.advanceTimersByTimeAsync(4_000);
+        const cancelled = expect(call(waiter.signal)).rejects.toMatchObject({ name: 'AbortError' });
+        waiter.abort();
+        await cancelled;
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect((await expired).code).toBe(JsonRpcErrorCode.Timeout);
+        expect(fake.urlsFor(endpoint)).toHaveLength(1);
+      },
+    );
+  });
+
   it('sheds a request whose queue wait exceeds its deadline as upstream_busy', async () => {
     const { fake, service } = setup({ config: { requestsPerSecond: 1 } });
     await service.countries(createMockContext());

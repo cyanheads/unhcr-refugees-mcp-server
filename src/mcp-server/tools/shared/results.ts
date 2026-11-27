@@ -22,11 +22,13 @@ import {
 import {
   ATTRIBUTION_SOURCE,
   DATA_LICENSE,
+  type ProbedDataset,
   type Provider,
   TERMS_URL,
 } from '@/services/unhcr/codes.js';
+import { reportingPeriods } from '@/services/unhcr/reporting-periods.js';
 import type { NowcastRow, RowIdentity } from '@/services/unhcr/types.js';
-import { getUnhcrService } from '@/services/unhcr/unhcr-api-service.js';
+import { getUnhcrService, staleReferenceNotices } from '@/services/unhcr/unhcr-api-service.js';
 import { clampCount } from './counts.js';
 import { isNormalizedList, LIMIT_CAP } from './inputs.js';
 import { type AppliedScope, type Attribution, yearSpan } from './outputs.js';
@@ -95,7 +97,7 @@ const dimensionColumns = (dimension: 'asylum' | 'origin'): ColumnSchema[] => [
   nullable(`${dimension}_unsd_region`, 'VARCHAR'),
 ];
 
-/** Identity and region columns every staged year-end table starts with. */
+/** Identity and region columns every staged population-statistics table starts with. */
 const STAGED_IDENTITY_COLUMNS: ColumnSchema[] = [
   nullable('year', 'INTEGER'),
   ...dimensionColumns('origin'),
@@ -104,7 +106,7 @@ const STAGED_IDENTITY_COLUMNS: ColumnSchema[] = [
 
 /**
  * The staged nowcast's columns: no origin, since the nowcast has none, so its
- * shape tells it apart from a year-end table in unhcr_dataframe_describe.
+ * shape tells it apart from a population table in unhcr_dataframe_describe.
  */
 const NOWCAST_COLUMNS: ColumnSchema[] = [
   nullable('year', 'INTEGER'),
@@ -131,6 +133,7 @@ export interface FinishInput<R extends RowIdentity> {
    * INTEGER columns unless `columnTypes` names another type.
    */
   countFields: readonly (keyof R & string)[];
+  dataset: ProbedDataset;
   /** Dataset name used in the empty-result notice ("population", "solutions"). */
   datasetLabel: string;
   /**
@@ -153,11 +156,13 @@ export interface FinishInput<R extends RowIdentity> {
    * unhcr_get_population's nowcast, finished as a table of its own beside
    * `rows`: sorted by `sortBy` when it names a nowcast count (otherwise by
    * asylum ISO3), cut at the same effective limit, and staged when it
-   * overflows or on request. Its notice fragments follow the year-end ones.
+   * overflows or on request. Its notice fragments follow the population ones.
    */
   nowcast?: readonly NowcastRow[] | undefined;
   providers: Provider[];
   queryParams: Record<string, unknown>;
+  /** Override the row years for joined sources, each with its own reported values. */
+  reportingSources?: readonly { dataset: ProbedDataset; rows: readonly RowIdentity[] }[];
   rows: readonly R[];
   /**
    * The resolved scope: its codes, window, and clamps shape the notice, and
@@ -183,6 +188,7 @@ export interface FinishedRows<R> {
   complete: boolean;
   dataset?: StagedDataset;
   latest_year: number;
+  reporting_periods: string[];
   rows: R[];
   total_rows: number;
 }
@@ -219,18 +225,21 @@ interface RegionLookup {
 interface StagedTable {
   complete: boolean;
   providers: Provider[];
+  reportingPeriods: string[];
   rows: (regions: RegionLookup) => Record<string, unknown>[];
   schema: ColumnSchema[];
 }
 
-/** The year-end rows as a staged table, at the same grain as `rows`. */
-function yearEndTable<R extends RowIdentity>(
+/** The statistical rows as a staged table, at the same grain as `rows`. */
+function statisticalTable<R extends RowIdentity>(
   input: FinishInput<R>,
   sorted: readonly R[],
+  periods: string[],
 ): StagedTable {
   return {
     complete: input.complete,
     providers: input.providers,
+    reportingPeriods: periods,
     schema: [
       ...STAGED_IDENTITY_COLUMNS,
       ...input.countFields.map((field) => nullable(field, input.columnTypes?.[field] ?? 'INTEGER')),
@@ -259,12 +268,18 @@ function yearEndTable<R extends RowIdentity>(
   };
 }
 
-/** The nowcast as a staged table of its own, kept apart from the year-end rows it overlaps. */
+/** The nowcast as a staged table of its own, kept apart from the population rows it overlaps. */
 function nowcastTable(sorted: readonly NowcastRow[]): StagedTable {
+  const periods = new Set<string>();
+  for (const { year, month } of sorted) {
+    const date = month === null ? `${year} (month unspecified)` : `${month} ${year}`;
+    periods.add(`UNHCR monthly nowcast: ${date}.`);
+  }
   return {
     // The nowcast is one page of about 200 rows, far below the row cap, so its walk is never cut short.
     complete: true,
     providers: [],
+    reportingPeriods: [...periods],
     schema: NOWCAST_COLUMNS,
     rows: (regions) =>
       sorted.map((row) => ({
@@ -305,6 +320,7 @@ async function stage<R extends RowIdentity>(
       schema: table.schema,
       complete: table.complete,
       providers: table.providers,
+      reportingPeriods: table.reportingPeriods,
     });
   } catch (error) {
     if (ctx.signal.aborted) throw error;
@@ -434,6 +450,14 @@ export async function finishRows<R extends RowIdentity>(
   input: FinishInput<R>,
 ): Promise<FinishResult<R>> {
   const sorted = sortRows(input.rows, input.sortBy);
+  const observedAt = Date.now();
+  const periods = (input.reportingSources ?? [input]).flatMap(({ dataset, rows }) =>
+    reportingPeriods(
+      dataset,
+      rows.map((row) => row.year),
+      observedAt,
+    ),
+  );
   const total = sorted.length;
   recordNormalizedLists(ctx, input.sourceTool, input.queryParams);
   const clamp = clampCount(ctx, {
@@ -464,7 +488,7 @@ export async function finishRows<R extends RowIdentity>(
     // At the cap, raising limit shows nothing more, so only narrowing is offered.
     const raiseLimit = limit < LIMIT_CAP ? `, or raise limit (max ${LIMIT_CAP}),` : '';
     if (canvasOn) {
-      dataset = await stage(ctx, input, yearEndTable(input, sorted));
+      dataset = await stage(ctx, input, statisticalTable(input, sorted, periods));
       fragments.push(
         dataset
           ? dataframeGuidance(dataset)
@@ -484,6 +508,7 @@ export async function finishRows<R extends RowIdentity>(
     input.nowcast &&
     (await finishNowcast(ctx, input, input.nowcast, { canvasOffSaid, canvasOn, limit }));
   if (nowcast) fragments.push(...nowcast.fragments);
+  fragments.push(...staleReferenceNotices(ctx));
 
   const notice = fragments.join(' ');
   if (overflow) ctx.enrich.truncated({ shown: rows.length, cap: limit, guidance: notice });
@@ -496,6 +521,7 @@ export async function finishRows<R extends RowIdentity>(
       complete: input.complete,
       applied_scope: input.scope.applied,
       latest_year: input.scope.coverage.latestYear,
+      reporting_periods: periods,
       ...(dataset && { dataset }),
       attribution: buildAttribution(input.providers),
     },

@@ -8,6 +8,9 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -64,6 +67,38 @@ describe('pages through the production enrichment parse', () => {
     expect(structuredOf(result).rows).toEqual([{ n: 7 }]);
     expect(textOf(result.content)).toContain('| 7 |');
   });
+
+  it('accepts rows as an implicit column alias', async () => {
+    const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 rows' });
+    expect(structuredOf(result)).toMatchObject({ columns: ['rows'], rows: [{ rows: 1 }] });
+    expect(textOf(result.content)).toContain('| rows |\n| --- |\n| 1 |');
+  });
+
+  it.each(['5 // 0', '5 % 0', '5.0 // 0', '5.0 % 0'])(
+    'rejects %s and returns NULL with TRY',
+    async (expression) => {
+      const rejected = await runToolContract(dataframeQueryTool, {
+        sql: `SELECT ${expression} AS n`,
+      });
+      expect(errorOf(rejected)).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'sql_execution_error',
+          recovery: { hint: expect.stringContaining('correct a rejected function argument') },
+        },
+      });
+      const errorText = unescapeMarkdown(textOf(rejected.content));
+      expect(errorText).toContain('Division by zero');
+      expect(errorText).toContain('TRY(...) to return NULL');
+
+      const caught = await runToolContract(dataframeQueryTool, {
+        sql: `SELECT TRY(${expression}) AS n`,
+      });
+      const expected = { columns: ['n'], rows: [{ n: null }] };
+      expect(structuredOf(caught)).toMatchObject(expected);
+      expect(textOf(caught.content)).toContain(JSON.stringify(expected));
+    },
+  );
 
   it('returns an empty result with its notice and the attribution line', async () => {
     const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS n WHERE false' });
@@ -729,8 +764,8 @@ describe('declared errors, by reason', () => {
 
   it.each([
     [
-      'a SELECT whose keyword alias lacks AS',
-      'SELECT 1 rows',
+      'a SELECT missing its alias after AS',
+      'SELECT 1 AS',
       'invalid_sql',
       'put AS before an alias that is an SQL keyword',
     ],
@@ -844,6 +879,41 @@ describe('declared errors, by reason', () => {
         recovery: { hint: recoveryFor('canvas_unavailable') },
       },
     });
+  });
+
+  it('queries and stages again after a scratch-directory obstruction is repaired', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'unhcr-canvas-recovery-'));
+    const parent = join(root, 'parent');
+    const localCanvas = createTestCanvas(10_000, join(parent, 'scratch'));
+    try {
+      await writeFile(parent, '');
+      initCanvasBridge(localCanvas, { ttlMs: 60_000 });
+      const failure = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS n' });
+      expect(errorOf(failure)).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'canvas_scratch_unavailable',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('CANVAS_TEMP_PATH') },
+        },
+      });
+      expect(unescapeMarkdown(textOf(failure.content))).toContain('CANVAS_TEMP_PATH');
+      expect(JSON.stringify(failure)).not.toContain(parent);
+
+      await rm(parent);
+      await mkdir(parent);
+      const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1 AS n' });
+      expect(structuredOf(result).rows).toEqual([{ n: 1 }]);
+      expect(textOf(result.content)).toContain('| 1 |');
+      const ctx = flowContext();
+      const table = await stagePopulation(ctx, { origin: 'SYR', year_from: 2025 });
+      expect((await queryIn(ctx, { sql: `SELECT COUNT(*) AS n FROM "${table}"` })).rows).toEqual([
+        { n: '1' },
+      ]);
+    } finally {
+      await shutdownCanvas(localCanvas);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('accepts a schema-valid preview above row_limit instead of failing with an undeclared reason', async () => {

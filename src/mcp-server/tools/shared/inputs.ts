@@ -7,6 +7,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { createCounter, logger } from '@cyanheads/mcp-ts-core/utils';
 import { MAX_COUNTRY_CODES } from '@/services/unhcr/country-input.js';
 import { countSchema } from './counts.js';
 
@@ -16,6 +17,45 @@ export const blankAsUnset = <T extends z.ZodType>(schema: T) =>
     (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
     schema,
   );
+
+const scalarInputCounter = createCounter(
+  'unhcr.scalar_input.normalized',
+  'Scalar string conversions that passed their field schema',
+  '{conversion}',
+);
+
+/**
+ * Accepts canonical scalar spellings behind blank handling without changing the advertised type.
+ * Records conversions per parser attempt. A sibling field can still reject the call.
+ */
+export function scalarInput<T extends z.ZodType>(
+  field: 'year_from' | 'year_to' | 'limit' | 'stage' | 'include_nowcast' | 'preview' | 'row_limit',
+  schema: T,
+  normalize: boolean,
+) {
+  return z.preprocess((value) => {
+    if (typeof value !== 'string') return value;
+    const text = value.trim();
+    if (text === '') return;
+    if (!normalize) return value;
+
+    let effective: number | boolean;
+    if (field === 'stage' || field === 'include_nowcast') {
+      if (text !== 'true' && text !== 'false') return value;
+      effective = text === 'true';
+    } else {
+      const number = Number(text);
+      if (!Number.isFinite(number) || String(number) !== text) return value;
+      effective = number;
+    }
+
+    if (schema.safeParse(effective).success) {
+      logger.info(`Scalar input normalized: ${field}`);
+      scalarInputCounter.add(1, { 'unhcr.scalar_input.field': field });
+    }
+    return effective;
+  }, schema);
+}
 
 /** Spells one code as its enum does. */
 type Fold = (code: string) => string;
@@ -158,6 +198,24 @@ const countryList = (dimension: string) =>
       .optional(),
   ).describe(dimension);
 
+/** The year window shared by every data tool. */
+export const yearInputs = (normalize: boolean) => ({
+  year_from: scalarInput(
+    'year_from',
+    z.number().int().min(1900).max(2100).optional(),
+    normalize,
+  ).describe(
+    "First year of the window. When omitted, the window starts at the dataset's first year. A year before the dataset's first year is clamped to it and the clamp is reported; a window entirely outside the dataset's years is rejected.",
+  ),
+  year_to: scalarInput(
+    'year_to',
+    z.number().int().min(1900).max(2100).optional(),
+    normalize,
+  ).describe(
+    'Last year of the window. When omitted, the window runs to the latest published year (latest_year in the result). A year past the latest published year is clamped to it and the clamp is reported.',
+  ),
+});
+
 /** Country filters, expand, and the year window shared by every data tool. */
 export const scopeInputs = {
   origin: countryList(
@@ -169,12 +227,7 @@ export const scopeInputs = {
   expand: blankAsUnset(z.enum(['none', 'origin', 'asylum', 'both']).default('none')).describe(
     'List every country, one row each, for a dimension that origin or asylum leaves unfiltered: origin, asylum, or both. Default none, where an unfiltered dimension is summed into one row. Expanding a dimension that origin or asylum already filters is rejected.',
   ),
-  year_from: blankAsUnset(z.number().int().min(1900).max(2100).optional()).describe(
-    "First year of the window. When omitted, the window starts at the dataset's first year. A year before the dataset's first year is clamped to it and the clamp is reported; a window entirely outside the dataset's years is rejected.",
-  ),
-  year_to: blankAsUnset(z.number().int().min(1900).max(2100).optional()).describe(
-    'Last year of the window. When omitted, the window runs to the latest published year (latest_year in the result). A year past the latest published year is clamped to it and the clamp is reported.',
-  ),
+  ...yearInputs(true),
 };
 
 /** Most inline rows one data-tool call returns. */
@@ -185,17 +238,21 @@ export const LIMIT_CAP = 2_000;
  * {@link LIMIT_CAP} is served at the cap with a notice (`finishRows` clamps
  * it); with `UNHCR_CLAMP_LIMITS=false` the schema rejects it.
  */
-export const limitInput = (clamp: boolean) =>
-  blankAsUnset(countSchema(1, LIMIT_CAP, clamp).default(25)).describe(
+export const limitInput = (clamp: boolean, normalize = true) =>
+  scalarInput('limit', countSchema(1, LIMIT_CAP, clamp).default(25), normalize).describe(
     clamp
       ? `Inline rows. Default 25; a larger value returns at most ${LIMIT_CAP} and says so. Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.`
       : `Inline rows, 1–${LIMIT_CAP} (default 25). Sorting runs over the full result first; a larger result is staged as a dataframe where dataframes are enabled.`,
   );
 
+/** The staging toggle shared by every data tool. */
+export const stageInput = (normalize: boolean) =>
+  scalarInput('stage', z.boolean().default(false), normalize).describe(
+    'Stage the full result as a dataframe even when it fits inline, e.g. to join it with another unhcr_get_* result in unhcr_dataframe_query. Where dataframes are unavailable it is ignored, and the notice says so.',
+  );
+
 /** Paging and staging controls shared by every data tool, in the default clamp mode. */
 export const resultInputs = {
-  limit: limitInput(true),
-  stage: blankAsUnset(z.boolean().default(false)).describe(
-    'Stage the full result as a dataframe even when it fits inline, e.g. to join it with another unhcr_get_* result in unhcr_dataframe_query. Where dataframes are unavailable it is ignored, and the notice says so.',
-  ),
+  limit: limitInput(true, true),
+  stage: stageInput(true),
 };

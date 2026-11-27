@@ -16,7 +16,8 @@ import {
   getCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { blankAsUnset } from '../shared/inputs.js';
-import { fence, inline } from '../shared/markdown.js';
+import { fence, inline, literalInline } from '../shared/markdown.js';
+import { reportingPeriodsSchema } from '../shared/outputs.js';
 
 export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
   title: 'Describe staged dataframes',
@@ -64,6 +65,7 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
             providers: z
               .array(z.string())
               .describe('Third-party series the rows carry (IDMC, UNRWA), for attribution.'),
+            reporting_periods: reportingPeriodsSchema.optional(),
             column_schema: z
               .array(
                 z
@@ -144,6 +146,7 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         complete: meta.complete,
         incomplete_sources: meta.incompleteSources,
         providers: meta.providers,
+        ...(meta.reportingPeriods && { reporting_periods: meta.reportingPeriods }),
         column_schema: meta.columnSchema.map((column) => ({
           name: column.name,
           type: column.engineType ?? column.type,
@@ -164,6 +167,9 @@ export const dataframeDescribeTool = tool('unhcr_dataframe_describe', {
         `- **Incomplete sources:** ${df.incomplete_sources.length ? df.incomplete_sources.join(', ') : 'none'}`,
         `- **Created:** ${df.created_at} · **Expires:** ${df.expires_at}`,
         `- **Providers:** ${df.providers.length ? df.providers.join(', ') : 'UNHCR only'}`,
+        ...(df.reporting_periods ?? []).map(
+          (period) => `- **Source reporting period:** ${literalInline(period)}`,
+        ),
         `- **Columns:** ${df.column_schema.map((column) => `${inline(column.name)} ${inline(column.type)} ${column.nullable ? 'nullable' : 'NOT NULL'}`).join(', ')}`,
         '- **Query params:**',
         '',

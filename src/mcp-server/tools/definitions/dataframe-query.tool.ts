@@ -22,8 +22,8 @@ import {
   getCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { type CountClamp, clampCount, countSchema } from '../shared/counts.js';
-import { blankAsUnset } from '../shared/inputs.js';
-import { attributionSchema, STAGING_BUDGET } from '../shared/outputs.js';
+import { blankAsUnset, scalarInput } from '../shared/inputs.js';
+import { attributionSchema, reportingPeriodsSchema, STAGING_BUDGET } from '../shared/outputs.js';
 import { formatQueryOutput, type QueryOutput } from '../shared/query-output.js';
 import { buildAttribution } from '../shared/results.js';
 
@@ -44,12 +44,18 @@ const ROW_LIMIT_DEFAULT = 1_000;
 export interface DataframeQueryOptions {
   /** `UNHCR_CLAMP_LIMITS`: serve an over-cap count at its cap with a notice; `false` rejects it at the schema. */
   clamp: boolean;
+  /** Read canonical numeric strings when `UNHCR_NORMALIZE_INPUTS` is on. */
+  normalize?: boolean;
   /** The canvas row cap (`CANVAS_DEFAULT_ROW_LIMIT`): `row_limit`'s cap, and its default when below 1,000. */
   rowLimitCap: number;
 }
 
-/** Build `unhcr_dataframe_query` for a clamp mode and canvas row cap. */
-export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryOptions) {
+/** Build `unhcr_dataframe_query` for one deployment's input settings. */
+export function defineDataframeQueryTool({
+  clamp,
+  normalize = true,
+  rowLimitCap,
+}: DataframeQueryOptions) {
   const rowLimitDefault = Math.min(ROW_LIMIT_DEFAULT, rowLimitCap);
 
   return tool(TOOL_NAME, {
@@ -74,12 +80,20 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
       ).describe(
         `Save the result as a new dataframe under this name (df_ plus two groups of 5 uppercase letters or digits, e.g. df_ABCDE_12345) with a fresh TTL, to chain analyses. The name must not already be staged. The saved rows count toward the ${STAGING_BUDGET} staging budget: the oldest other dataframes are evicted to make room, and a result larger than the budget is not saved.`,
       ),
-      preview: blankAsUnset(countSchema(0, PREVIEW_CAP, clamp).optional()).describe(
+      preview: scalarInput(
+        'preview',
+        countSchema(0, PREVIEW_CAP, clamp).optional(),
+        normalize,
+      ).describe(
         clamp
           ? `Rows returned inline; 0 returns only the columns and counts. Default ${PREVIEW_DEFAULT}; a larger value returns at most ${PREVIEW_CAP}, or row_limit when lower, and says so.`
           : `Rows returned inline; 0 returns only the columns and counts. 0–${PREVIEW_CAP} (default ${PREVIEW_DEFAULT}); a value above row_limit returns row_limit rows and says so.`,
       ),
-      row_limit: blankAsUnset(countSchema(1, rowLimitCap, clamp).default(rowLimitDefault)).describe(
+      row_limit: scalarInput(
+        'row_limit',
+        countSchema(1, rowLimitCap, clamp).default(rowLimitDefault),
+        normalize,
+      ).describe(
         clamp
           ? `Most rows the query materializes. Default ${rowLimitDefault}; a larger value materializes at most ${rowLimitCap} and says so. When more rows match, row_count_capped is true; use register_as to keep the full result.`
           : `Most rows the query materializes, 1–${rowLimitCap} (default ${rowLimitDefault}). When more rows match, row_count_capped is true; use register_as to keep the full result.`,
@@ -124,6 +138,11 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
           `Older dataframes dropped, oldest first, to keep the staged total within the ${STAGING_BUDGET} budget once register_as saved this result; they can no longer be queried. Present only when any were evicted.`,
         ),
       attribution: attributionSchema,
+      reporting_periods: reportingPeriodsSchema
+        .optional()
+        .describe(
+          'Reporting periods of source dataframes, including saved ancestors. SQL may project or filter their rows.',
+        ),
     }),
 
     enrichment: {
@@ -150,6 +169,16 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
         when: 'Dataframes are turned off in this deployment, or the SQL engine behind them could not load',
         recovery:
           "Dataframes are unavailable in this deployment, so retrying will not help; narrow the unhcr_get_* call's filters or year window so its rows fit inline.",
+      },
+      {
+        reason: 'canvas_scratch_unavailable',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: false,
+        severity: 'warning',
+        thrownBy: 'service',
+        when: 'The server cannot create the scratch directory for a new dataframe workspace',
+        recovery:
+          'Ask the operator to make CANVAS_TEMP_PATH (or the system temp directory) writable by the server process, then repeat the call.',
       },
       {
         reason: 'missing_table',
@@ -264,14 +293,11 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
               requested: input.preview,
               cap: Math.min(PREVIEW_CAP, rowLimit.effective),
             });
-      const { result, meta, providers, evicted, complete, incompleteSources } = await bridge.query(
-        ctx,
-        input.sql,
-        {
+      const { result, meta, providers, reportingPeriods, evicted, complete, incompleteSources } =
+        await bridge.query(ctx, input.sql, {
           rowLimit: rowLimit.effective,
           ...(input.register_as !== undefined && { registerAs: input.register_as }),
-        },
-      );
+        });
 
       const output: QueryOutput = {
         columns: result.columns,
@@ -283,6 +309,7 @@ export function defineDataframeQueryTool({ clamp, rowLimitCap }: DataframeQueryO
         ...(meta && { registered_as: meta.tableName, expires_at: meta.expiresAt }),
         ...(evicted && { evicted }),
         attribution: buildAttribution(providers),
+        ...(reportingPeriods.length > 0 && { reporting_periods: reportingPeriods }),
       };
 
       const shown = output.rows.length;

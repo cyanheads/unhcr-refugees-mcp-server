@@ -144,6 +144,13 @@ const footnoteSchema = z
   })
   .describe('One UNHCR data caveat that applies to rows of this result.');
 
+/** Reporting context shared by data and dataframe tools. */
+export const reportingPeriodsSchema = z
+  .array(z.string())
+  .describe(
+    'Reporting periods by source and row year. Local caveats may narrow a published period.',
+  );
+
 /** Output fields every data tool returns, keyed for spreading into `z.object`. */
 export const sharedResultFields = {
   total_rows: z
@@ -159,9 +166,13 @@ export const sharedResultFields = {
     ),
   measure: z
     .enum(['stock', 'flow'])
-    .describe('stock: people in a situation on 31 December; flow: events during the year.'),
+    .describe('stock: people in a situation at a point in time; flow: events during a period.'),
   applied_scope: appliedScopeSchema,
-  latest_year: z.number().int().describe('Newest year this dataset publishes.'),
+  latest_year: z
+    .number()
+    .int()
+    .describe('Newest row year this dataset publishes, including partial years.'),
+  reporting_periods: reportingPeriodsSchema,
   dataset: datasetSchema.optional(),
   data_notes: z
     .array(z.string())
@@ -181,7 +192,7 @@ export const dataEnrichment = {
     .string()
     .optional()
     .describe(
-      'Guidance for this result: empty-result hints, year and limit clamps, where the full set was staged, or how to narrow.',
+      'Stale reference lists used and their ages, or guidance on empty results, year and limit clamps, and staged results.',
     ),
   truncated: z.boolean().optional().describe('True when rows were cut at limit.'),
   shown: z.number().optional().describe('Rows returned inline.'),
@@ -245,6 +256,7 @@ export function renderResultHeader(result: {
     | undefined;
   latest_year: number;
   measure: string;
+  reporting_periods: readonly string[];
   rows: readonly unknown[];
   total_rows: number;
 }): string[] {
@@ -259,6 +271,12 @@ export function renderResultHeader(result: {
       `**Dataset:** ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})`,
     );
     if (result.dataset.evicted) lines.push(renderEvicted(result.dataset.evicted));
+  }
+  if (result.reporting_periods.length > 0) {
+    lines.push(
+      '**Reporting periods:**',
+      ...result.reporting_periods.map((period) => `- ${period}`),
+    );
   }
   return lines;
 }

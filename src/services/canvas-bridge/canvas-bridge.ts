@@ -52,6 +52,8 @@ export interface DataframeMeta {
   /** Third-party series the rows carry, for attribution downstream. */
   providers: Provider[];
   queryParams: Record<string, unknown>;
+  /** Statistical reporting context captured when the original data was staged. */
+  reportingPeriods?: string[];
   rowCount: number;
   sourceTool: string;
   tableName: string;
@@ -80,6 +82,7 @@ export interface RegisterOptions {
   complete: boolean;
   providers: Provider[];
   queryParams: Record<string, unknown>;
+  reportingPeriods?: string[];
   rows: Record<string, unknown>[];
   schema: ColumnSchema[];
   sourceTool: string;
@@ -101,6 +104,7 @@ export interface BridgeQueryResult {
   meta?: DataframeMeta;
   /** Union of the providers recorded for every dataframe the SQL references. */
   providers: Provider[];
+  reportingPeriods: string[];
   result: QueryResult;
 }
 
@@ -268,6 +272,7 @@ export class CanvasBridge {
         complete: options.complete,
         incompleteSources: options.complete ? [] : [result.tableName],
         providers: options.providers,
+        ...(options.reportingPeriods && { reportingPeriods: options.reportingPeriods }),
         columnSchema: options.schema,
       };
       const evicted = await this.recordWithinBudget(ctx, instance, meta);
@@ -354,10 +359,17 @@ export class CanvasBridge {
     }
 
     const providers = [...new Set(referenced.flatMap((meta) => meta.providers))].sort();
+    const reportingPeriods = [
+      ...new Set(referenced.flatMap((meta) => meta.reportingPeriods ?? [])),
+    ].sort();
     const incompleteSources = [
       ...new Set(referenced.flatMap((meta) => meta.incompleteSources)),
     ].sort();
-    const provenance = { complete: incompleteSources.length === 0, incompleteSources };
+    const provenance = {
+      complete: incompleteSources.length === 0,
+      incompleteSources,
+      reportingPeriods,
+    };
     if (!options.registerAs || !result.tableName) return { result, providers, ...provenance };
 
     // On the registerAs path the provider counts the saved table, so rowCount is exact.
@@ -387,6 +399,7 @@ export class CanvasBridge {
       complete: provenance.complete,
       incompleteSources,
       providers,
+      ...(reportingPeriods.length > 0 && { reportingPeriods }),
       columnSchema: info?.columns ?? [],
     };
     const evicted = await this.recordWithinBudget(ctx, instance, meta);
@@ -580,8 +593,8 @@ export class CanvasBridge {
   /**
    * The tenant's shared canvas, minted when none is live unless `create` is
    * `false`. Finding none live purges the metadata kept for the dead one,
-   * before any caller obtains a replacement. A `ConfigurationError` here is the
-   * DuckDB binding failing to load, latched so no later call tries again.
+   * before any caller obtains a replacement. The provider caches a missing
+   * binding but retries scratch-directory creation on the next mint.
    */
   private async acquireSharedCanvas(ctx: Context): Promise<CanvasInstance>;
   private async acquireSharedCanvas(
@@ -601,6 +614,26 @@ export class CanvasBridge {
       });
     } catch (error) {
       if (error instanceof McpError && error.code === JsonRpcErrorCode.ConfigurationError) {
+        // Scratch initialization retains its filesystem cause. The lazy binding import has none.
+        if (error.cause !== undefined) {
+          const cause = error.cause;
+          if (
+            cause instanceof Error &&
+            'syscall' in cause &&
+            (cause.syscall === 'mkdir' || cause.syscall === 'mkdtemp')
+          ) {
+            throw serviceUnavailable(
+              'The server could not create its canvas scratch directory.',
+              {
+                reason: 'canvas_scratch_unavailable',
+                retryable: false,
+                ...ctx.recoveryFor('canvas_scratch_unavailable'),
+              },
+              { cause: error },
+            );
+          }
+          throw error;
+        }
         this.latchedOff = true;
         const message = 'DataCanvas unavailable: the DuckDB binding could not load';
         ctx.log.warning(message);

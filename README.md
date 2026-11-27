@@ -29,7 +29,7 @@
 
 ## Overview
 
-Refugee and displacement statistics from the [UNHCR Refugee Data Finder](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations since 1951, asylum applications and decisions since 2000, and returns and resettlement since 1959. Pull annual figures by country of origin and asylum, and run SQL over large results. No API key required.
+Refugee and displacement statistics from the [UNHCR Refugee Data Finder](https://api.unhcr.org/docs/refugee-statistics.html): refugee, asylum-seeker, IDP, and stateless populations since 1951, asylum applications and decisions since 2000, and returns and resettlement since 1959. Pull published figures by country of origin and asylum, and run SQL over large results. No API key required.
 
 ### Tools
 
@@ -133,6 +133,7 @@ The five `unhcr_get_*` tools share one contract:
 - `row_limit` caps the rows the query materializes, and `row_count_capped` flags a capped result. It defaults to 1,000, or to the canvas row cap (`CANVAS_DEFAULT_ROW_LIMIT`, 10,000 by default) when that is lower, and a larger value returns the canvas row cap with a notice naming requested and effective values. `register_as` saves the whole result under a new `df_XXXXX_XXXXX` name with a fresh TTL. It counts toward the 1,000,000-row staging budget, and a result that alone exceeds it fails `register_as_too_large`
 - `preview` sets the rows returned inline: default 25, at most 1,500 or `row_limit`, whichever is lower, with the same notice above the cap. `preview: 0` returns the columns and counts with no rows. With `UNHCR_CLAMP_LIMITS=false`, a `row_limit` above the canvas row cap or a `preview` above 1,500 fails validation instead
 - `SUM` and `COUNT` values come back as strings (BIGINT). `attribution` credits the third-party series of every table the SQL reads
+- With integer or DECIMAL operands, division using `//` and modulo using `%` return `sql_execution_error` on a zero divisor. Wrap the expression in `TRY(...)` to return NULL for those rows
 - `complete` and `incomplete_sources` describe upstream coverage independently of display truncation: aggregates, joins and saved descendants remain partial if an original source was partial
 - Every returned value is whole on both surfaces. Results with plain labels and cells use Markdown tables; values needing exact whitespace, control characters, nested structures or Markdown syntax use fenced JSON
 
@@ -158,7 +159,7 @@ UNHCR-specific:
 Agent-friendly output:
 
 - Provenance on every data result: `applied_scope` echoes the codes, year window, and ISO2 rewrites actually sent, alongside `latest_year`, `measure`, `complete`, and `attribution`
-- Caveats as data: `data_notes` say how to read each result (stock or flow, rounding, what null means), and matching UNHCR `footnotes` arrive with `rows_matched`
+- `reporting_periods` names the publication window by series and row year, including mid-year coverage and separately dated UNRWA and IDMC figures. `data_notes` say how to read each result (stock or flow, rounding, what null means), and matching UNHCR `footnotes` arrive with `rows_matched`
 - Typed failures with recovery hints: `unknown_country_code` suggests the ISO3 for a UNHCR code or a common country name (`TURKEY is not an ISO country code; Türkiye is TUR.`), `year_out_of_coverage` names the dataset's span, `upstream_busy` carries `retryAfter`
 - Nothing trimmed silently: year and limit clamps, empty-result hints, truncation, and where the full set was staged all arrive as a notice in the response
 
@@ -203,7 +204,7 @@ UNHCR's API is keyless, so no key or account is needed, and every variable under
 | `UNHCR_DATASET_TTL_SECONDS` | Lifetime of a staged dataframe, in seconds (minimum 60). | `86400` |
 | `UNHCR_DATAFRAME_DROP_ENABLED` | Set `true` to register `unhcr_dataframe_drop`. | `false` |
 | `UNHCR_CLAMP_LIMITS` | Serves `limit`, `preview`, and `row_limit` above their cap at the cap, with a notice. Set `false` to advertise each cap as a schema `maximum` and reject a larger value. | `true` |
-| `UNHCR_NORMALIZE_INPUTS` | Reads `stages`, `decision_levels`, `population_types`, and `split_by` sent as a string as the array of the codes in it, and `split_by` in any case. Set `false` to reject both. | `true` |
+| `UNHCR_NORMALIZE_INPUTS` | Reads `stages`, `decision_levels`, `population_types`, and `split_by` as delimited strings, folds `split_by` to lowercase, and reads canonical number and boolean strings in numeric and boolean inputs. Set `false` to disable these conversions. | `true` |
 | `CANVAS_PROVIDER_TYPE` | Dataframe engine: `duckdb`, or `none` to turn dataframes off. | `duckdb` |
 | `CANVAS_DEFAULT_ROW_LIMIT` | Most rows one `unhcr_dataframe_query` call materializes; the cap on `row_limit`, and its default when below 1,000. | `10000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |

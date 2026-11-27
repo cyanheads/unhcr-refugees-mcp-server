@@ -175,7 +175,9 @@ unhcr-refugees-mcp-server/
 │   │       ├── country-input.ts
 │   │       ├── footnote-match.ts
 │   │       ├── normalize.ts
+│   │       ├── reporting-periods.ts
 │   │       ├── response-cache.ts
+│   │       ├── shared-load.ts
 │   │       ├── types.ts
 │   │       └── unhcr-api-service.ts
 │   └── index.ts
@@ -216,6 +218,9 @@ unhcr-refugees-mcp-server/
 │   │   ├── get-population.tool.test.ts
 │   │   ├── get-solutions.tool.test.ts
 │   │   ├── list-reference.tool.test.ts
+│   │   ├── reference-resilience.test.ts
+│   │   ├── reporting-periods.test.ts
+│   │   ├── scalar-inputs.test.ts
 │   │   ├── shared.test.ts
 │   │   └── yearless-rows.test.ts
 │   └── index.test.ts

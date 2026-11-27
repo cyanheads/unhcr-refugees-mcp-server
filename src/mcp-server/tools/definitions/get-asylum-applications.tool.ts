@@ -47,7 +47,7 @@ function dataNotes(options: {
   yearlessRows: number;
 }): string[] {
   const notes = [
-    'Counts are flows: asylum applications lodged during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
+    'Counts are flows: asylum applications lodged during the reporting period. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
     'Each row states its unit. Some countries report cases, where one case can cover several people; counts of cases are never added to counts of persons.',
     'authorities, stages, and decision_levels list the codes summed into each row; decode them with unhcr_list_reference (topic asylum_codes).',
     'Values below 5 are rounded to the nearest multiple of 5, so small counts are approximate.',
@@ -195,6 +195,7 @@ export const getAsylumApplicationsTool = tool('unhcr_get_asylum_applications', {
       skippedRows: aggregated.skippedRows,
     });
     const finished = await finishRows(ctx, {
+      dataset: 'asylum-applications',
       sourceTool: 'unhcr_get_asylum_applications',
       datasetLabel: 'asylum-application',
       queryParams: { ...input },

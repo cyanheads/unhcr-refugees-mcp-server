@@ -57,7 +57,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(true)
     .describe(
-      'Reads a code-list input (stages, decision_levels, population_types, split_by) sent as a string as the array of its codes, and split_by in any case. false rejects both instead.',
+      'Reads code lists sent as strings, folds split_by to lowercase, and reads canonical strings in numeric and boolean inputs. Set to false to disable these conversions.',
     ),
 });
 

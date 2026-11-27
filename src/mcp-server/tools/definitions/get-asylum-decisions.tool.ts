@@ -49,7 +49,7 @@ function dataNotes(options: {
   yearlessRows: number;
 }): string[] {
   const notes = [
-    'Counts are flows: asylum decisions made during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
+    'Counts are flows: asylum decisions made during the reporting period. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
     'refugee_recognition_rate = recognized ÷ substantive_decisions × 100, and total_protection_rate = (recognized + complementary_protection) ÷ substantive_decisions × 100, UNHCR’s definitions. substantive_decisions = recognized + complementary_protection + rejected, and is null when any of the three is null in any upstream row summed into it, so no rate rests on a partial denominator; otherwise_closed cases are excluded from both rates. Rates are computed from each row’s summed counts and are null when substantive_decisions is 0 or null.',
     'total_decisions sums UNHCR’s published totals, which can differ from the sum of the four outcomes because of rounding.',
     'Rates on small counts are unreliable: counts below 10 are rounded to the nearest multiple of 5.',
@@ -240,6 +240,7 @@ export const getAsylumDecisionsTool = tool('unhcr_get_asylum_decisions', {
       skippedRows: aggregated.skippedRows,
     });
     const finished = await finishRows(ctx, {
+      dataset: 'asylum-decisions',
       sourceTool: 'unhcr_get_asylum_decisions',
       datasetLabel: 'asylum-decision',
       queryParams: { ...input },

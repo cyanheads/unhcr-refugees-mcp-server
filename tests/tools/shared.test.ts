@@ -639,6 +639,7 @@ describe('finishRows levers at the limit cap', () => {
     const ctx = createMockContext();
     const result = await finishRows<Row>(ctx, {
       sourceTool: 'unhcr_get_population',
+      dataset: 'population',
       datasetLabel: 'population',
       queryParams: {},
       scope,

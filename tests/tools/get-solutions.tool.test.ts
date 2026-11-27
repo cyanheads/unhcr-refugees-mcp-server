@@ -100,7 +100,7 @@ describe('success, both surfaces', () => {
     });
     const notes = structured.data_notes as string[];
     expect(notes[0]).toBe(
-      'Counts are flows: events during each calendar year, not people present at year end.',
+      'Counts are flows: events during the reporting period. Check footnotes for country-specific dates.',
     );
     expect(notes).toContain('Naturalisation is an incomplete proxy for local integration.');
     expect(

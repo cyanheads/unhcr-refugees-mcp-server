@@ -19,6 +19,11 @@ export function inline(text: string): string {
   return text.replace(LINE_BREAK, ' ');
 }
 
+/** Render upstream data as inline text without interpreting Markdown or HTML. */
+export function literalInline(text: string): string {
+  return inline(text).replace(/[\\*_<>[\]\x60&]/gu, '\\$&');
+}
+
 /** Escape text for one markdown table cell. */
 export function cell(text: string): string {
   return inline(text).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');

@@ -516,10 +516,10 @@ describe('footnotes', () => {
     ]);
     expect(structured.footnotes_total).toBe(1);
     expect((structured.data_notes as string[])[0]).toBe(
-      'Counts are flows: asylum applications lodged during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
+      'Counts are flows: asylum applications lodged during the reporting period. A footnote can narrow the period a row covers, so check the footnotes before comparing years.',
     );
     expect(textOf(result.content)).toContain(
-      `\n\n### Footnotes (1 of 1)\n- **2024** · any origin, asylum USA · types REF, ROC, ASY, IDP, IOC, STA, OOC, RET, RDP, HST, OIP, RST, NAT · 1 rows matched\n\n> ${USA_2024_FOOTNOTE_TEXT}\n\n\n### Data notes\n- Counts are flows: asylum applications lodged during each calendar year. A footnote can narrow the period a row covers, so check the footnotes before comparing years.\n`,
+      `\n\n### Footnotes (1 of 1)\n- **2024** · any origin, asylum USA · types REF, ROC, ASY, IDP, IOC, STA, OOC, RET, RDP, HST, OIP, RST, NAT · 1 rows matched\n\n> ${USA_2024_FOOTNOTE_TEXT}\n\n\n### Data notes\n- Counts are flows: asylum applications lodged during the reporting period. A footnote can narrow the period a row covers, so check the footnotes before comparing years.\n`,
     );
   });
 

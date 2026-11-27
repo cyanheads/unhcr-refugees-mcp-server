@@ -4,7 +4,7 @@
  * @module mcp-server/tools/shared/query-output
  */
 
-import { fence, table } from './markdown.js';
+import { fence, literalInline, table } from './markdown.js';
 import { type Attribution, renderAttribution, renderEvicted } from './outputs.js';
 
 /** Domain payload of unhcr_dataframe_query, before framework enrichment. */
@@ -16,6 +16,7 @@ export interface QueryOutput {
   expires_at?: string;
   incomplete_sources: string[];
   registered_as?: string;
+  reporting_periods?: string[];
   row_count: number;
   row_count_capped: boolean;
   rows: Record<string, unknown>[];
@@ -37,6 +38,9 @@ export function formatQueryOutput(result: QueryOutput): { type: 'text'; text: st
   lines.push(
     `Complete: ${result.complete}. Incomplete sources: ${result.incomplete_sources.length ? result.incomplete_sources.join(', ') : 'none'}.`,
   );
+  for (const period of result.reporting_periods ?? []) {
+    lines.push(`Source reporting period: ${literalInline(period)}`);
+  }
   const simple = (value: unknown): boolean =>
     typeof value === 'number' ||
     typeof value === 'boolean' ||

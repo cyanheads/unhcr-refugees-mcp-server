@@ -21,7 +21,7 @@ export const TERMS_URL =
 /** Third-party series UNHCR's API carries; credited in `attribution.providers`. */
 export type Provider = 'IDMC' | 'UNRWA';
 
-/** Whether a count is a year-end stock or a within-year flow. */
+/** Whether a count is a stock at a point in time or a flow during a period. */
 export type Measure = 'flow' | 'stock';
 
 /** One UNHCR population type and the output column that carries it. */
@@ -260,7 +260,7 @@ export const DATASETS: readonly DatasetInfo[] = [
     endpoint: 'population',
     tool: 'unhcr_get_population',
     measure: 'stock',
-    note: 'Year-end stocks by origin and asylum country; returned_refugees and returned_idps are flows during the year.',
+    note: 'Stocks by origin and asylum country; returned_refugees and returned_idps are flows during the reporting period.',
   },
   {
     dataset: 'demographics',
@@ -274,21 +274,21 @@ export const DATASETS: readonly DatasetInfo[] = [
     endpoint: 'asylum-applications',
     tool: 'unhcr_get_asylum_applications',
     measure: 'flow',
-    note: 'Asylum applications lodged during each year, by application stage, authority, decision level, and unit (persons or cases).',
+    note: 'Asylum applications lodged during the reporting period, by application stage, authority, decision level, and unit (persons or cases).',
   },
   {
     dataset: 'asylum_decisions',
     endpoint: 'asylum-decisions',
     tool: 'unhcr_get_asylum_decisions',
     measure: 'flow',
-    note: 'Asylum decisions during each year by outcome, with the Refugee Recognition Rate and Total Protection Rate over substantive decisions.',
+    note: 'Asylum decisions during the reporting period by outcome, with the Refugee Recognition Rate and Total Protection Rate over substantive decisions.',
   },
   {
     dataset: 'solutions',
     endpoint: 'solutions',
     tool: 'unhcr_get_solutions',
     measure: 'flow',
-    note: 'Returns, resettlement arrivals, and naturalisations during each year.',
+    note: 'Returns, resettlement arrivals, and naturalisations during the reporting period.',
   },
   {
     dataset: 'unrwa',

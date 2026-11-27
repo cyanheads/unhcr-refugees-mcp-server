@@ -271,6 +271,7 @@ export const getDemographicsTool = tool('unhcr_get_demographics', {
 
     const filterEmptied = types.length > 0 && fetched.rows.length > 0 && rows.length === 0;
     const finished = await finishRows(ctx, {
+      dataset: 'demographics',
       sourceTool: 'unhcr_get_demographics',
       datasetLabel: 'demographics',
       queryParams: { ...input },
